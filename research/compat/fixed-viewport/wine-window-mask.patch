@@ -1,0 +1,19 @@
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -2876,6 +2876,16 @@
+ 
+         if (CGRectIsEmpty(rect))
+             return;
++
++        /* The candidate's mask arrives in raw display pixels, while the
++         * shape path uses window-local Cocoa points. */
++        const char *viewport = getenv("RA3_FIXED_VIEWPORT");
++        if (viewport && !strcmp(viewport, "3024x1900"))
++        {
++            NSRect maskRect = NSRectFromCGRect(cgrect_mac_from_win(rect));
++            [[WineApplicationController sharedController] flipRect:&maskRect];
++            rect = NSRectToCGRect([self convertRectFromScreen:maskRect]);
++        }
+ 
+         CAShapeLayer *shapeLayer = [CAShapeLayer layer];
+         shapeLayer.bounds = self.contentView.layer.bounds;

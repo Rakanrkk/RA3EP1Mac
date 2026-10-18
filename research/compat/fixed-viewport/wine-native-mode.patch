@@ -1,0 +1,20 @@
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -2087,10 +2087,16 @@
+     const DEVMODEW *mode;
+     UINT i, count;
+
+-    count = 1 + ARRAY_SIZE(default_sizes) + modes_count;
++    count = 2 + ARRAY_SIZE(default_sizes) + modes_count;
+     if (!(sizes = malloc( count * sizeof(*sizes) ))) return NULL;
+
+     count = add_screen_size( sizes, 0, max_size );
++    if (max_width >= 3024 && max_height >= 1900)
++    {
++        const char *viewport = getenv( "RA3_FIXED_VIEWPORT" );
++        if (viewport && !strcmp( viewport, "3024x1900" ))
++            count += add_screen_size( sizes, count, (SIZE){3024, 1900} );
++    }
+     for (i = 0; i < ARRAY_SIZE(default_sizes); i++)
+     {
+         if (default_sizes[i].cx > max_size.cx || default_sizes[i].cy > max_size.cy) continue;

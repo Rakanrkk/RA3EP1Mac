@@ -1,0 +1,57 @@
+--- a/dlls/win32u/input.c
++++ b/dlls/win32u/input.c
+@@ -740,7 +740,7 @@
+     BOOL ret = TRUE;
+     DWORD last_change = 0;
+     NTSTATUS status;
+-    RECT rect;
++    RECT rect, cursor_clip;
+ 
+     if (!pt) return FALSE;
+ 
+@@ -749,11 +749,44 @@
+         pt->x = desktop_shm->cursor.x;
+         pt->y = desktop_shm->cursor.y;
+         last_change = desktop_shm->cursor.last_change;
++        cursor_clip = wine_server_get_rect( desktop_shm->cursor.clip );
+     }
+     if (status) return FALSE;
+ 
+     /* query new position from graphics driver if we haven't updated recently */
+-    if (NtGetTickCount() - last_change > 100) ret = user_driver->pGetCursorPos( pt );
++    if (NtGetTickCount() - last_change > 100)
++    {
++        ret = user_driver->pGetCursorPos( pt );
++        if (ret)
++        {
++            const char *viewport = getenv( "RA3_FIXED_VIEWPORT" );
++            HWND foreground = NtUserGetForegroundWindow();
++            RECT window_rect;
++            MONITORINFO monitor;
++
++            /* Native polling bypasses the server's clipping.  Keep a
++             * foreground fullscreen viewport at its physical input bounds. */
++            if (viewport && !strcmp( viewport, "3024x1900" ) &&
++                foreground && is_current_process_window( foreground ) &&
++                (NtUserGetWindowLongW( foreground, GWL_STYLE ) & WS_VISIBLE))
++            {
++                monitor = monitor_info_from_window( foreground, MONITOR_DEFAULTTONEAREST );
++                if (get_window_rect( foreground, &window_rect, get_thread_dpi() ) &&
++                    window_rect.left <= monitor.rcMonitor.left &&
++                    window_rect.top <= monitor.rcMonitor.top &&
++                    window_rect.right >= monitor.rcMonitor.right &&
++                    window_rect.bottom >= monitor.rcMonitor.bottom)
++                {
++                    RECT clip = map_rect_virt_to_raw( monitor.rcMonitor, get_thread_dpi() );
++                    if (intersect_rect( &clip, &clip, &cursor_clip ))
++                    {
++                        pt->x = min( clip.right - 1, max( clip.left, pt->x ));
++                        pt->y = min( clip.bottom - 1, max( clip.top, pt->y ));
++                    }
++                }
++            }
++        }
++    }
+     if (!ret) return FALSE;
+ 
+     SetRect( &rect, pt->x, pt->y, pt->x, pt->y );

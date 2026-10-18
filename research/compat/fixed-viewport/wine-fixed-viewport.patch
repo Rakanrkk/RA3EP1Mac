@@ -1,0 +1,87 @@
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -27,4 +27,5 @@
+ #include <pthread.h>
+ #include <assert.h>
++#include <stdlib.h>
+ 
+ #include "ntstatus.h"
+@@ -2321,4 +2322,26 @@
+ }
+ 
++/* Opt-in viewport for the isolated RA3 fullscreen candidate.  Keep the
++ * existing raw/virtual conversions and server pointer mapping; only change
++ * their destination rectangle.  Unset or unsupported displays remain stock. */
++static BOOL ra3_fixed_viewport( struct monitor *monitor, const DEVMODEW *physical, RECT *rect )
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        const char *value = getenv( "RA3_FIXED_VIEWPORT" );
++        enabled = value && !strcmp( value, "3024x1900" );
++    }
++    if (!enabled || !is_monitor_primary( monitor ) ||
++        physical->dmPelsWidth < 3024 || physical->dmPelsHeight < 1900) return FALSE;
++
++    rect->left = physical->dmPosition.x + (physical->dmPelsWidth - 3024) / 2;
++    rect->right = rect->left + 3024;
++    rect->bottom = physical->dmPosition.y + physical->dmPelsHeight;
++    rect->top = rect->bottom - 1900;
++    return TRUE;
++}
++
+ /* display_lock must be held */
+ static RECT map_monitor_rect( struct monitor *monitor, RECT rect, UINT dpi_from, MONITOR_DPI_TYPE type_from,
+@@ -2341,4 +2364,40 @@
+         if (!dpi_from) dpi_from = dpi;
+         if (!dpi_to) dpi_to = dpi;
++
++        if ((type_from == MDT_DEFAULT && type_to == MDT_RAW_DPI) ||
++            (type_from == MDT_RAW_DPI && type_to == MDT_DEFAULT))
++        {
++            RECT viewport;
++
++            if (ra3_fixed_viewport( monitor, &physical_mode, &viewport ))
++            {
++                UINT effective_dpi = monitor_get_dpi( monitor, MDT_EFFECTIVE_DPI, &x, &y );
++                RECT virt, src, dst;
++                int i;
++
++                SetRect( &virt, current_mode.dmPosition.x, current_mode.dmPosition.y,
++                         current_mode.dmPosition.x + current_mode.dmPelsWidth,
++                         current_mode.dmPosition.y + current_mode.dmPelsHeight );
++                virt = map_dpi_rect( virt, effective_dpi, dpi );
++                src = type_from == MDT_DEFAULT ? virt : viewport;
++                dst = type_from == MDT_DEFAULT ? viewport : virt;
++                if (src.right > src.left && src.bottom > src.top)
++                {
++                    for (i = 0; i < ARRAY_SIZE(points); i++)
++                    {
++                        points[i] *= (double)dpi / dpi_from;
++                        if (i & 1)
++                            points[i] = dst.top + (points[i] - src.top) * (dst.bottom - dst.top) / (double)(src.bottom - src.top);
++                        else
++                            points[i] = dst.left + (points[i] - src.left) * (dst.right - dst.left) / (double)(src.right - src.left);
++                        points[i] *= (double)dpi_to / dpi;
++                        points[i] = roundf( points[i] );
++                        points[i] = min( INT_MAX, max( INT_MIN, (INT64)points[i] ));
++                    }
++                    SetRect( &rect, points[0], points[1], points[2], points[3] );
++                    return rect;
++                }
++            }
++        }
+ 
+         if (type_from == MDT_RAW_DPI)
+@@ -2439,4 +2498,10 @@
+         info->virt = wine_server_rectangle( monitor_get_rect( monitor, 0, MDT_EFFECTIVE_DPI ) );
+         info->raw = wine_server_rectangle( monitor_get_rect( monitor, 0, MDT_RAW_DPI ) );
++        if (monitor->source)
++        {
++            RECT viewport;
++            if (ra3_fixed_viewport( monitor, &monitor->source->physical, &viewport ))
++                info->raw = wine_server_rectangle( viewport );
++        }
+         info++;
+     }

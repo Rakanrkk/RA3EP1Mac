@@ -1,0 +1,19 @@
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1184,6 +1184,16 @@
+     NtUserMapWindowPoints(hwnd, toplevel, (POINT *)&rect, 2, NtUserGetWinMonitorDpi(toplevel, MDT_RAW_DPI));
+ 
+     if (!(data = get_win_data(toplevel))) return;
++    if (hwnd == toplevel)
++    {
++        const char *viewport = getenv("RA3_FIXED_VIEWPORT");
++        if (viewport && !strcmp(viewport, "3024x1900"))
++        {
++            /* win32u already mapped the top-level client to the fixed viewport. */
++            SetRect(&rect, 0, 0, data->rects.client.right - data->rects.client.left,
++                    data->rects.client.bottom - data->rects.client.top);
++        }
++    }
+     OffsetRect(&rect, data->rects.client.left - data->rects.visible.left, data->rects.client.top - data->rects.visible.top);
+     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(rect));
+     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);

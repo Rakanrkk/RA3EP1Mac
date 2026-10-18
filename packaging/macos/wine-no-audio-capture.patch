@@ -1,0 +1,82 @@
+diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
+index 3199887..412b57e 100644
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -161,6 +161,15 @@ static AudioObjectPropertyScope get_scope(EDataFlow flow)
+     return (flow == eRender) ? kAudioDevicePropertyScopeOutput : kAudioDevicePropertyScopeInput;
+ }
+ 
++/* RA3: when set (to anything except "0"), refuse every capture-side request
++ * before it can reach CoreAudio, so the process never touches the microphone
++ * path or its TCC authorization. Render/output paths are untouched. */
++static BOOL capture_disabled(EDataFlow flow)
++{
++    const char *env = getenv("RA3_NO_AUDIO_CAPTURE");
++    return flow == eCapture && env && env[0] && strcmp(env, "0");
++}
++
+ static BOOL device_has_channels(AudioDeviceID device, EDataFlow flow)
+ {
+     AudioObjectPropertyAddress addr;
+@@ -243,6 +252,13 @@ static NTSTATUS unix_get_endpoint_ids(void *args)
+     params->num = 0;
+     params->default_idx = 0;
+ 
++    /* RA3: report an empty capture endpoint list without querying any input
++     * device properties. */
++    if (capture_disabled(params->flow)){
++        params->result = S_OK;
++        return STATUS_SUCCESS;
++    }
++
+     addr.mScope = kAudioObjectPropertyScopeGlobal;
+     addr.mElement = kAudioObjectPropertyElementMain;
+     if(params->flow == eRender) addr.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+@@ -731,6 +747,13 @@ static NTSTATUS unix_create_stream(void *args)
+ 
+     params->result = S_OK;
+ 
++    /* RA3: deny capture stream creation before any AudioUnit/CoreAudio work
++     * (and before the capture authorization request). */
++    if (capture_disabled(params->flow)){
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        return STATUS_SUCCESS;
++    }
++
+     if (!(stream = calloc(1, sizeof(*stream)))) {
+         params->result = E_OUTOFMEMORY;
+         return STATUS_SUCCESS;
+@@ -1028,7 +1051,15 @@ static NTSTATUS unix_get_mix_format(void *args)
+     UInt32 size;
+     OSStatus sc;
+     int i;
+-    const AudioDeviceID dev_id = dev_id_from_device(params->device);
++    AudioDeviceID dev_id;
++
++    /* RA3: no capture mix-format queries against input devices. */
++    if (capture_disabled(params->flow)){
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        return STATUS_SUCCESS;
++    }
++
++    dev_id = dev_id_from_device(params->device);
+ 
+     params->fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+ 
+@@ -1127,7 +1158,15 @@ static NTSTATUS unix_is_format_supported(void *args)
+     AudioStreamBasicDescription dev_desc;
+     AudioConverterRef converter;
+     AudioComponentInstance unit;
+-    const AudioDeviceID dev_id = dev_id_from_device(params->device);
++    AudioDeviceID dev_id;
++
++    /* RA3: never create the HALOutput input unit just to probe formats. */
++    if (capture_disabled(params->flow)){
++        params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
++        return STATUS_SUCCESS;
++    }
++
++    dev_id = dev_id_from_device(params->device);
+ 
+     unit = get_audiounit(params->flow, dev_id);
+ 
