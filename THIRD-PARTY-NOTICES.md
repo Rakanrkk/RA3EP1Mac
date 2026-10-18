@@ -36,9 +36,10 @@ modifications.
 ## Distribution editions
 
 The Git repository contains source and documentation. Release files are
-separate: the Toolkit DMG excludes the commercial game, and the Full DMG
-contains the prepared game App and its supplied runtime components. The full
-edition is not all open source and is not covered by one blanket MIT license.
+separate: the Runtime DMG supplies the runtime and app-building tools; the
+Standalone DMG contains the prepared game App and its runtime components.
+Standalone includes proprietary game content alongside the open-source components
+listed above, each under its own license.
 Neither edition includes a developer private key, signing credentials,
 personal saved games or session logs.
 

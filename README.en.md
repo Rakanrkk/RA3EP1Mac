@@ -6,22 +6,27 @@ RA3Mac is not affiliated with or endorsed by Electronic Arts (EA), Apple, or the
 
 ## Release editions
 
-RA3EP1Mac 1.1.0 has two different DMG editions:
+RA3EP1Mac 1.1.0 has Standalone and Runtime editions. Release assets follow the order shown on GitHub:
 
-| Edition | Contents | Intended for |
-| --- | --- | --- |
-| **Full App DMG** — `RA3Mac-1.1.0-Full.dmg` | A standalone macOS app with the runtime and game. | Players who want to install the app. |
-| **Runtime DMG** — `RA3Mac-1.1.0-Runtime.dmg` | Wine runtime, initialized prefix template, RA3Mac tools and native app-building helpers. It contains no game executable, BIG game archives, player saves, or assembled app. | Owners of a compatible game copy who want to build their own app. |
-| **Source archive**, when listed | RA3Mac source and patches. Matching Wine source is published separately as `Wine-3562fea-RA3Mac-source.tar.zst`. | Developers inspecting or rebuilding the sources. |
+| File | Purpose |
+| --- | --- |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-runtime.dmg`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-runtime.dmg) | Runtime edition: Wine runtime, initialized prefix template, RA3Mac tools and native app-building helpers. No game files, saves or assembled app. |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg) | Standalone edition: ready-to-install app with runtime and game, part 1 of 4. Keep all four parts together with names unchanged; open only this `.001.dmg`. macOS reads the sibling parts; do not concatenate them. |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart) | Standalone edition, part 2 of 4. |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart) | Standalone edition, part 3 of 4. |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart) | Standalone edition, part 4 of 4. |
+| [`RA3EP1Mac-v1.1.0-wine-source.tar.zst`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-wine-source.tar.zst) | Wine source matching the Runtime edition, including the RA3Mac patches. |
+| [`release-manifest.json`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/release-manifest.json) | Release asset manifest. |
+| [`SHA256SUMS.txt`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/SHA256SUMS.txt) | SHA-256 checksums for the release assets. |
 
-A source checkout alone does not contain the game or a complete runtime. Check the release page for the exact edition files, checksums, and split-archive instructions.
+A source checkout alone does not contain the game or a complete runtime. Review [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before redistributing components.
 
 ## What it does
 
 - Runs the original 32-bit Windows game engine; this is not a native rewrite or official macOS port.
 - Uses mtld3d to connect the game's Direct3D 9 path to Metal.
 - Plans the fullscreen viewport from the primary display geometry and safe area. The outer Wine window spans the display to preserve edge input while the game rendering area avoids notches and other unsafe edges.
-- Includes tested display, pointer-mapping, fullscreen-mask, Bloom/Glow compatibility changes, and RA3Mac's timing patch game-timing compatibility payload.
+- Includes tested display, pointer-mapping, fullscreen-mask, Bloom/Glow compatibility changes, and RA3Mac's game-timing compatibility payload.
 - Keeps writable prefix data, settings, saves, and logs in the user's Application Support container, separate from the app template.
 - Disables microphone capture in the bundled Wine CoreAudio path before it accesses input devices; audio output remains available. This describes the packaged Wine configuration only.
 
@@ -40,16 +45,16 @@ flowchart LR
 - **Target**: Apple Silicon M1 or later with Rosetta 2 installed.
 - **Build target**: packaging tools are compiled against the macOS 15 SDK. Actual game launch and visual checks have been completed on one Apple Silicon Mac with a 2× notched display. Earlier macOS releases have not been runtime-tested.
 - **Tested display**: 3024×1964 full display; 3024×1900 game safe viewport and Metal drawable. The candidate was launched and visually checked on the test Mac.
-- **Not yet covered**: other M1-or-later hardware, non-notched displays, 1× external displays, multiple or rotated displays, display hot-plug or primary-display changes during play, complete campaign/challenge flows, all save/load and result screens, or long-duration stability.
-- **Frame rate**: timing patch is a game-timing compatibility payload. It is not a guarantee of a sustained 60 FPS on every Mac; not every scene has an independent FPS benchmark.
-- **Display changes**: the viewport plan is created at launch. Quit and relaunch after changing the primary display or its mode.
+- **Not yet covered**: other M1-or-later hardware, non-notched displays, 1× external displays, multiple displays, display hot-plug or primary-display changes during play, complete campaign/challenge flows, all save/load and result screens, or long-duration stability.
+- **Frame rate**: the timing patch supports the game's timing behavior; it does not guarantee sustained 60 FPS on every Mac, and not every scene has an independent FPS benchmark.
+- **Display changes**: the viewport plan is created at launch. Quit and relaunch after changing the primary display or its mode. Portrait orientation is not supported.
 
 A successful build or a local visual check does not certify every Mac, game scenario, or macOS version.
 
-## Install the Full App
+## Install the Standalone App
 
-1. Download `RA3Mac-1.1.0-Full.dmg` from the release page. Verify the published checksums and review the bundled third-party notices.
-2. Open the DMG and drag the app to Applications.
+1. Download all four Standalone parts from the release page. Verify the published checksums and review the bundled third-party notices.
+2. Keep `RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg`, `RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart`, `RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart`, and `RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart` together in one folder with their filenames unchanged. Open only the `.001.dmg`; macOS reads the sibling parts itself, so no manual concatenation is needed. Drag the app to Applications.
 3. Ensure Rosetta 2 is installed, then open the app from Applications.
 4. On first launch, the app prepares an independent Wine prefix. Settings and saves are stored in the current user's Application Support directory.
 
@@ -59,12 +64,12 @@ Back up the user data directory before replacing an app or migrating saves. Do n
 
 The Runtime DMG includes a prepared Wine runtime and prefix template, but deliberately excludes game files, game archives, and saves. Supply your own compatible game copy. The importer verifies the required layout and game identity and refuses an unsupported build. It does not download a game or Wine. The source game directory and prefix are not modified in place.
 
-Mount the Runtime DMG and run these commands from the RA3Mac repository root, adjusting the mounted volume name and paths as needed. Output paths must not already exist.
+Mount the Runtime DMG and run these commands from the RA3Mac repository root. The downloaded file still mounts under the volume name `RA3EP1Mac-1.1.0-Runtime`, which the examples below use. Output paths must not already exist.
 
 ```sh
 python3 -I packaging/macos/import_runtime.py \
-  --wine "/Volumes/RA3Mac-1.1.0-Runtime/Runtime/wine" \
-  --prefix "/Volumes/RA3Mac-1.1.0-Runtime/Runtime/prefix" \
+  --wine "/Volumes/RA3EP1Mac-1.1.0-Runtime/Runtime/wine" \
+  --prefix "/Volumes/RA3EP1Mac-1.1.0-Runtime/Runtime/prefix" \
   --game-dir "/path/to/your/Red Alert 3 Uprising" \
   --output "$HOME/RA3Mac-work/runtime" \
   --presentation safe-area
@@ -77,11 +82,11 @@ Use the launcher, display helpers, planner, and icon included in the Runtime DMG
 ```sh
 python3 -I packaging/macos/release_build.py \
   --runtime-root "$HOME/RA3Mac-work/runtime" \
-  --audio-module "/Volumes/RA3Mac-1.1.0-Runtime/Runtime/wine/lib/wine/x86_64-unix/winecoreaudio.so" \
-  --icon "/Volumes/RA3Mac-1.1.0-Runtime/Tools/AppIcon.icns" \
-  --launcher "/Volumes/RA3Mac-1.1.0-Runtime/Tools/RA3Launcher" \
-  --display-helper "/Volumes/RA3Mac-1.1.0-Runtime/Tools/display-mode" \
-  --display-plan "/Volumes/RA3Mac-1.1.0-Runtime/Tools/display-plan" \
+  --audio-module "/Volumes/RA3EP1Mac-1.1.0-Runtime/Runtime/wine/lib/wine/x86_64-unix/winecoreaudio.so" \
+  --icon "/Volumes/RA3EP1Mac-1.1.0-Runtime/Tools/AppIcon.icns" \
+  --launcher "/Volumes/RA3EP1Mac-1.1.0-Runtime/Tools/RA3Launcher" \
+  --display-helper "/Volumes/RA3EP1Mac-1.1.0-Runtime/Tools/display-mode" \
+  --display-plan "/Volumes/RA3EP1Mac-1.1.0-Runtime/Tools/display-plan" \
   --output "$HOME/RA3Mac-work/RA3Mac.app" \
   --presentation safe-area
 ```
@@ -132,7 +137,19 @@ When reporting a problem, include the RA3Mac edition/version, Mac chip family, m
 | `packaging/resources/` | Generator and verifier for compatibility resource copies. |
 | `research/compat/adaptive-viewport/` | Current adaptive viewport, primary-display planning, Wine patches, and offline gate. |
 | `research/compat/fixed-viewport/` | Legacy fixed-size display path and historical checks. |
-| `payload/timing/` | RA3Mac timing patch game-timing compatibility payload and identity manifest. |
+| `payload/timing/` | RA3Mac game-timing compatibility payload and identity manifest. |
+
+## Open-source acknowledgements
+
+This project builds on the following open-source projects. Thanks to their developers and contributors:
+
+| Project | Role in this project | Upstream and release source | License |
+| --- | --- | --- | --- |
+| Wine (including WoW64) | Runs the 32-bit Windows game; RA3Mac's display and audio patches are based on Wine. WoW64 is a Wine capability. | [WineHQ](https://www.winehq.org/); source fork [athei/wine](https://github.com/athei/wine), pinned to `3562fea11d1830725859ac5ed790a3b9789ccd14`; packaged build [athei/wine-build](https://github.com/athei/wine-build), `cx-26.3.0-7` | LGPL-2.1-or-later |
+| mtld3d v0.13.0 | Connects the game's Direct3D 9 rendering to Metal. | [athei/mtld3d v0.13.0](https://github.com/athei/mtld3d/releases/tag/v0.13.0) | zlib |
+| Noto Sans CJK SC | Simplified Chinese fonts bundled with the distribution. | [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) | SIL Open Font License 1.1 |
+
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for applicable license scopes and the [matching patched Wine source archive](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-wine-source.tar.zst). For building, [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw) compiles the Windows payload and PE modules; [GNU Make](https://www.gnu.org/software/make/) and [Bison](https://www.gnu.org/software/bison/) are used to rebuild Wine. Licenses for LLVM-MinGW runtime components are covered in the third-party notices.
 
 ## Version, contributions, and license
 

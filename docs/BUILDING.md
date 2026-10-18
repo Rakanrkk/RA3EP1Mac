@@ -1,12 +1,12 @@
 # Building the local macOS app
 
-This repository provides a no-game toolkit and packaging tools for a user-local Red Alert 3: Uprising app. A full app build requires game files you own, a complete matching Wine runtime and prefix, a locally built patched Wine audio module, and an icon you provide. Those large inputs are not included in the repository, so a clean checkout alone cannot create the full app. The preparation scripts are `packaging/macos/prepare_wine_source.py` for a supplied Wine checkout, `packaging/macos/import_runtime.py` for cloning a supplied runtime and initialized prefix, and `packaging/macos/build_wine_modules.py` for building patched modules into the imported clone. They still require those local inputs and the macOS build toolchain; review each script’s `--help` and relevant Wine build requirements.
+This repository provides a no-game toolkit and packaging tools for building a user-local Red Alert 3: Uprising app. Building the app requires game files you own, a complete matching Wine runtime and prefix, a locally built patched Wine audio module, and an icon you provide. Those large inputs are not included in the repository, so a clean checkout alone cannot create the app. The preparation scripts are `packaging/macos/prepare_wine_source.py` for a supplied Wine checkout, `packaging/macos/import_runtime.py` for cloning a supplied runtime and initialized prefix, and `packaging/macos/build_wine_modules.py` for building patched modules into the imported clone. They still require those local inputs and the macOS build toolchain; review each script’s `--help` and relevant Wine build requirements.
 
 The release wrapper compiles the native launcher and display helpers with the macOS Swift toolchain, assembles the bundle, signs it, and verifies the signature. It does not install or launch the game. The safe-area adaptive candidate is the default and uses its own application identity and Application Support data. Use `--presentation fixed` to build with the existing fixed viewport identity.
 
 ## Requirements
 
-- A Mac with `xcrun swiftc` and a macOS SDK supporting deployment target15 or newer.
+- A Mac with `xcrun swiftc` and a macOS SDK supporting deployment target 15 or newer.
 - The upstream Wine source at the revision expected by `packaging/macos/prepare_wine_source.py`, and the build dependencies documented by that Wine checkout, if preparing patched Wine modules yourself.
 - A prepared runtime root containing `wine/`, `prefix/`, and `candidate-manifest.json`. Its manifest must pin the runtime, game files, and launcher payload, and all pinned hashes must match. The packaging inputs must come from the same matching runtime preparation.
 - A patched `winecoreaudio.so` Mach-O containing the `RA3_NO_AUDIO_CAPTURE` marker. If building it yourself, `build_wine_modules.py` overlays Wine modules into the imported runtime clone; use that clone’s resulting `winecoreaudio.so` as `--audio-module`.
@@ -48,14 +48,16 @@ The build report records source pin checks, packaging actions, and the selected 
 
 The launcher uses an Application Support directory selected by the app’s bundle identity. The adaptive candidate keeps its data separate from the fixed release. Before replacing an installed app, back up the installed bundle and its Application Support prefix. If you want to transfer saves, copy only into the matching profile in the promoted app’s prefix after backing up both prefixes. Keep any same-path files with different contents as conflicts; do not overwrite them during migration. Preserve the tested adaptive app identity when promoting it so the candidate continues to use its existing prefix.
 
-This packaging flow does not replace an installed app, migrate saves, delete backups, or launch the game. Perform any app replacement or user-data migration as a separate, deliberate operation after reviewing the reports and backups. Share a full app bundle only where you have the rights to distribute every included game, runtime, and third-party component; the repository does not upload bundles or inputs.
+This packaging flow does not replace an installed app, migrate saves, delete backups, or launch the game. Perform any app replacement or user-data migration as a separate, deliberate operation after reviewing the reports and backups. Share a built app bundle only where you have the rights to distribute every included game, runtime, and third-party component; the repository does not upload bundles or inputs.
 
 ## Runtime DMG (no game)
 
-Copy the DMG contents to a writable folder, or use absolute mounted paths. Supply
-a supported game directory with the RGBA8 Bloom/Glow compatibility resources.
-The runtime template already supplies the independent FPS payload. No Xcode is
-required if all three bundled native helpers are supplied as overrides. Python3
+Copy the DMG contents to a writable folder, or use absolute mounted paths. The
+runtime download still mounts under the volume name `RA3EP1Mac-1.1.0-Runtime`,
+which the paths below use. Supply a supported game directory with the RGBA8
+Bloom/Glow compatibility resources.
+The runtime template already includes the game-timing compatibility payload. No Xcode is
+required if all three bundled native helpers are supplied as overrides. Python 3
 is still required.
 
 ```bash
@@ -98,6 +100,8 @@ sharing copy and remove player artifacts, then sign that copy again.
 python3 -I packaging/macos/make_dmg.py --source /path/to/dmg-staging --output /path/to/new/RA3Mac.dmg --volume-name RA3Mac --format ULFO
 ```
 
-Release assets must each be below GitHub's2GiB limit. The full image uses native
-DMG segmentation. Keep all parts together and open only the first `.dmg`; no
-manual concatenation is needed. Verify SHA256SUMS before opening.
+Each release asset must be below GitHub's 2 GiB limit. The Standalone image uses native
+DMG segmentation: `RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg` followed by
+`.002.dmgpart`, `.003.dmgpart` and `.004.dmgpart` with the same filename stem.
+Keep all four parts together with their filenames unchanged and open only `.001.dmg`;
+macOS reads the remaining parts automatically. Verify `SHA256SUMS.txt` before opening.

@@ -6,15 +6,20 @@
 
 ## 发行包
 
-RA3EP1Mac 1.1.0 提供 Full 和 Runtime 两个下载项，内容见下表。
+RA3EP1Mac 1.1.0 提供 Standalone 和 Runtime 两个版本。发布文件顺序与 GitHub 页面一致：
 
-| 发行包 | 内容 | 适合谁 |
-| --- | --- | --- |
-| **完整 App DMG** — `RA3EP1Mac-1.1.0-Full.dmg` | 可拖入“应用程序”的独立 App、运行时与游戏。 | 想直接安装的玩家。 |
-| **Runtime DMG** — `RA3EP1Mac-1.1.0-Runtime.dmg` | Wine 运行时、已初始化 prefix 模板、RA3Mac 自有工具和 App 构建所需原生 helper；不含游戏可执行文件、游戏 BIG 资源、用户存档或已组装 App。 | 已有兼容游戏副本、希望自己构建 App 的用户。 |
-| **源码归档** — 发布页提供时 | RA3Mac 源码与补丁；配套 Wine 源码以 `Wine-3562fea-RA3Mac-source.tar.zst` 单独发布。 | 希望查看或重建源码的开发者。 |
+| 文件 | 用途 |
+| --- | --- |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-runtime.dmg`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-runtime.dmg) | Runtime 版：Wine 运行时、已初始化 prefix 模板、RA3Mac 工具和 App 构建 helper；不含游戏文件、存档或已组装的 App。 |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg) | Standalone 版：含运行时和游戏的即装 App，原生 DMG 第 1 卷。四个分卷须放在同一目录并保持原文件名；只打开本 `.001.dmg`，macOS 会读取其他分卷，无需拼接。 |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart) | Standalone 版原生 DMG 第 2 卷。 |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart) | Standalone 版原生 DMG 第 3 卷。 |
+| [`RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart) | Standalone 版原生 DMG 第 4 卷。 |
+| [`RA3EP1Mac-v1.1.0-wine-source.tar.zst`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-wine-source.tar.zst) | 与 Runtime 版匹配的 Wine 源码归档，含 RA3Mac 补丁。 |
+| [`release-manifest.json`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/release-manifest.json) | 发行文件清单。 |
+| [`SHA256SUMS.txt`](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/SHA256SUMS.txt) | 所有发行文件的 SHA-256 校验值。 |
 
-下载文件、分卷和SHA-256校验值见[Release](https://github.com/Rakanrkk/RA3EP1Mac/releases/latest)。
+单独的源码检出不含游戏或完整运行时。查看 [Release 发布页](https://github.com/Rakanrkk/RA3EP1Mac/releases/latest)并在分发组件前阅读[第三方说明](THIRD-PARTY-NOTICES.md)。
 
 本项目针对独立资料片 **RA3EP1《起义时刻》**，游戏程序为`ra3ep1_1.0.game`。
 
@@ -23,8 +28,8 @@ RA3EP1Mac 1.1.0 提供 Full 和 Runtime 两个下载项，内容见下表。
 - **原版游戏引擎**：通过Wine/WoW64运行32位Windows游戏程序。
 - **Direct3D 9 到 Metal**：通过 mtld3d 将游戏的 D3D9 渲染路径连接到 Metal。
 - **自适应全屏视口**：启动时读取主显示器几何与安全区。Wine 外层窗口保留整屏范围以接收边缘输入，游戏绘制区域避开刘海等安全边缘。
-- **兼容性修正**：保留经过验证的显示、鼠标映射、全屏遮罩和 Bloom／Glow 兼容修改，以及 RA3Mac 的 游戏时序补丁。
-- **独立用户数据**：完整 App 首次启动时在当前用户的 Application Support 中准备自己的 Wine prefix；游戏设置、存档与日志和 App 模板分开保存。
+- **兼容性修正**：保留经过验证的显示、鼠标映射、全屏遮罩和 Bloom／Glow 修改，以及 RA3Mac 的游戏时序补丁。
+- **独立用户数据**：Standalone 版首次启动时在当前用户的 Application Support 中准备自己的 Wine prefix；游戏设置、存档与日志和 App 模板分开保存。
 - **麦克风采集关闭**：随包 Wine CoreAudio 修改在访问输入设备前拒绝录音采集请求，声音输出仍可使用。
 
 ```mermaid
@@ -47,18 +52,18 @@ flowchart LR
 - **目标设备**：Apple Silicon M1 或更新机型，并安装 Rosetta 2。
 - **构建目标**：原生工具以 macOS 15 部署目标编译（实际SDK取决于构建工具链）。项目的实际游戏运行与目视检查目前只在一台 Apple Silicon Mac 和一块 2× 刘海显示屏上完成；较早 macOS 版本尚未经过实际运行验证。
 - **已验证显示情形**：测试机的整屏为 3024×1964 像素，游戏安全绘制区及 Metal drawable 为 3024×1900 像素。实际启动后完成了本机画面检查。
-- **仍待验证**：其他 M1 或更新设备、无刘海内屏、1× 外接屏、多显示器、竖屏、运行中热插拔或切换主屏，以及完整战役、挑战、所有存读档／结算情形和长期稳定性。
-- **帧率说明**：使用时序补丁时序补丁；实际帧率取决于硬件、画质和场景，尚无完整跨设备基准。
+- **仍待验证**：其他 M1 或更新设备、无刘海内屏、1× 外接屏、多显示器、运行中热插拔或切换主屏，以及完整战役、挑战、所有存读档／结算情形和长期稳定性。
+- **帧率说明**：时序补丁是游戏时序兼容载荷；实际帧率取决于硬件、画质和场景，尚无完整跨设备基准。
 - **显示配置变化**：启动器按启动时的主显示器计划游戏区域。游戏运行期间更换主屏或显示模式，需要退出后重新打开应用。
 
-竖屏暂不支持；更换主屏或缩放后请重启游戏。
+仅支持横屏；更换主屏或缩放后请重启游戏。
 
 ## 安装与首次启动
 
-### 使用完整 App DMG
+### 使用 Standalone DMG
 
-1. 从所需版本的发布页获取完整 App DMG，并核对发布页提供的校验值和第三方通知。
-2. 完整版由4个原生DMG分卷组成：下载`RA3EP1Mac-1.1.0-Full.dmg`及同名`.002.dmgpart`、`.003.dmgpart`、`.004.dmgpart`到同一目录，保持文件名，然后只打开首个`.dmg`。系统会自动读取其余分卷，无需手工拼接。将App拖入“应用程序”。
+1. 从发布页获取 Standalone 版的 4 个分卷，并核对发布页提供的校验值和第三方通知。
+2. 将 `RA3EP1Mac-v1.1.0-macos-arm64-standalone.001.dmg`、`RA3EP1Mac-v1.1.0-macos-arm64-standalone.002.dmgpart`、`RA3EP1Mac-v1.1.0-macos-arm64-standalone.003.dmgpart` 和 `RA3EP1Mac-v1.1.0-macos-arm64-standalone.004.dmgpart` 下载到同一目录，保持文件名不变；只打开首个 `.001.dmg`，macOS 会自动读取同目录的其余分卷，无需手工拼接。将 App 拖入“应用程序”。
 3. 确认系统已安装 Rosetta 2，然后从“应用程序”打开 App。
 4. 首次启动会准备独立的游戏 prefix；后续游戏设置与存档保存在当前用户的 Application Support 中。
 
@@ -68,7 +73,7 @@ flowchart LR
 
 Runtime DMG提供Wine运行时和prefix模板，游戏需自行导入。使用自己的游戏副本，依照下面的命令导入并构建。需要 macOS、Python 3；若使用随 DMG 提供的 Tools helper，可略过 Swift 编译。游戏目录与 prefix 都不会被构建器就地修改。
 
-挂载 Runtime DMG 后，在仓库根目录执行。请按实际挂载位置调整路径；输出目录与 `.app` 目标都必须不存在：
+挂载 Runtime DMG 后，在仓库根目录执行。下载文件挂载后的卷名仍为 `RA3EP1Mac-1.1.0-Runtime`，下方命令使用该路径；输出目录与 `.app` 目标都必须不存在：
 
 ```bash
 python3 -I packaging/macos/import_runtime.py \
@@ -79,7 +84,7 @@ python3 -I packaging/macos/import_runtime.py \
   --presentation safe-area
 ```
 
-`--game-dir` 应是含有 `Data/ra3ep1_1.0.game`、`Shaders.big`、`Misc.big` 和 `StaticStream.big` 的游戏目录。支持版本与资源会经过 SHA-256 检查；不匹配时导入会失败。`--payload-dir` 可选，默认为 prefix 中的 `drive_c/u60-mtld3d`，其中包含随 Runtime DMG 提供的 RA3Mac 时序补丁 兼容载荷。
+`--game-dir` 应是含有 `Data/ra3ep1_1.0.game`、`Shaders.big`、`Misc.big` 和 `StaticStream.big` 的游戏目录。支持版本与资源会经过 SHA-256 检查；不匹配时导入会失败。`--payload-dir` 可选，默认为 prefix 中的 `drive_c/u60-mtld3d`，其中包含随 Runtime DMG 提供的 RA3Mac 游戏时序兼容载荷。
 
 然后使用 Runtime DMG 的 `Tools` 目录中随包提供的 launcher、display helper、planner 和图标：
 
@@ -118,11 +123,11 @@ python3 -I -B packaging/macos/test_release_build.py
 python3 -I -B packaging/macos/test_build_app.py
 ```
 
-启动器的命令行帮助和静态资源校验入口为 `RA3Launcher --help` 与 `RA3Launcher --verify-only`。完整 App 首次准备用户 prefix 时使用 `--prepare-only` 可执行准备步骤而不启动游戏；仅对已构建的完整 App 使用这些选项。
+启动器的命令行帮助和静态资源校验入口为 `RA3Launcher --help` 与 `RA3Launcher --verify-only`。Standalone 版首次准备用户 prefix 时使用 `--prepare-only` 可执行准备步骤而不启动游戏；仅对已构建的 Standalone 版使用这些选项。
 
-## 从个人游戏副本构建完整 App
+## 从个人游戏副本构建 App
 
-完整构建需要一份已初始化的 Wine prefix 和符合支持布局的 Wine 运行时。所有输入都应放在仓库外的独立目录；不要直接修改唯一的游戏安装或正在使用的 prefix。示例路径是你自己的路径，输出目录必须事先不存在。
+自行构建需要一份已初始化的 Wine prefix 和符合支持布局的 Wine 运行时。所有输入都应放在仓库外的独立目录；不要直接修改唯一的游戏安装或正在使用的 prefix。示例路径是你自己的路径，输出目录必须事先不存在。
 
 1. **准备兼容资源副本（可选）**。脚本只接受已知原始归档或已接受的修改版本，并会校验输出哈希；原游戏目录只读。把生成的归档放进游戏目录的独立副本中：
 
@@ -177,7 +182,7 @@ python3 -I -B packaging/macos/test_build_app.py
 
 ## 用户数据、日志与隐私
 
-- 完整 App 的可写 prefix、游戏设置、存档及日志位于 `~/Library/Application Support/org.ra3mac.UprisingMetal.Adaptive/` 下。升级或重新安装 App 前先备份该目录。
+- Standalone 版的可写 prefix、游戏设置、存档及日志位于 `~/Library/Application Support/org.ra3mac.UprisingMetal.Adaptive/` 下。升级或重新安装 App 前先备份该目录。
 - 每次运行的诊断文件写入同一 Application Support 容器下的 `Logs/`。日志可能包含系统路径或环境信息；公开分享前先检查并移除个人数据。
 - 打包的 Wine 配置会禁用麦克风采集路径，App 不请求麦克风权限；扬声器输出仍可用。
 - 在线功能暂未测试。
@@ -187,7 +192,7 @@ python3 -I -B packaging/macos/test_build_app.py
 
 | 现象 | 建议 |
 | --- | --- |
-| 启动器提示缺少文件或哈希不匹配 | 确认 Wine、prefix、游戏版本、mtld3d 和 时序补丁 载荷布局符合该发行版本要求；不要绕过身份校验。 |
+| 启动器提示缺少文件或哈希不匹配 | 确认 Wine、prefix、游戏版本、mtld3d 和游戏时序载荷布局符合该发行版本要求；不要绕过身份校验。 |
 | 提示 Rosetta 不可用 | 在 Apple Silicon Mac 上安装并启用 Rosetta 2，然后重新启动 App。 |
 | 全屏区域或鼠标边缘不正确 | 退出游戏，恢复预期的主显示器与显示模式，再启动 App；先确认是否属于尚未验证的显示配置。 |
 | 签名或首次打开被系统阻止 | 确认下载来自预期发布页，重新核对校验值和签名状态。发行包使用ad-hoc完整性签名，首次打开可在系统隐私与安全性中批准。 |
@@ -203,7 +208,19 @@ python3 -I -B packaging/macos/test_build_app.py
 | `packaging/resources/` | 兼容资源副本生成与校验工具。 |
 | `research/compat/adaptive-viewport/` | 当前自适应视口、主显示器计划、Wine 补丁与离线门禁。 |
 | `research/compat/fixed-viewport/` | 旧固定尺寸显示路径及历史检查工具。 |
-| `payload/timing/` | RA3Mac 时序补丁 游戏时序兼容补丁及身份清单。 |
+| `payload/timing/` | RA3Mac 游戏时序兼容补丁及身份清单。 |
+
+## 开源致谢
+
+本项目基于以下开源成果构建，感谢上游开发者的工作：
+
+| 项目 | 在本项目中的作用 | 上游与发行源码 | 许可 |
+| --- | --- | --- | --- |
+| Wine（含 WoW64） | 运行 32 位 Windows 游戏；RA3Mac 的显示和音频补丁基于 Wine 构建。WoW64 是 Wine 的能力。 | [WineHQ](https://www.winehq.org/)；源码分支 [athei/wine](https://github.com/athei/wine)，固定于 `3562fea11d1830725859ac5ed790a3b9789ccd14`；预构建运行时 [athei/wine-build](https://github.com/athei/wine-build)，版本 `cx-26.3.0-7` | LGPL-2.1-or-later |
+| mtld3d v0.13.0 | 将游戏的 Direct3D 9 渲染连接到 Metal。 | [athei/mtld3d v0.13.0](https://github.com/athei/mtld3d/releases/tag/v0.13.0) | zlib |
+| Noto Sans CJK SC | 发行包中捆绑的简体中文字体。 | [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) | SIL Open Font License 1.1 |
+
+许可范围与适用说明见[第三方说明](THIRD-PARTY-NOTICES.md)及[匹配的 Wine 补丁源码归档](https://github.com/Rakanrkk/RA3EP1Mac/releases/download/v1.1.0/RA3EP1Mac-v1.1.0-wine-source.tar.zst)。构建时，[LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw) 用于编译 Windows 载荷与 PE 模块；重建 Wine 使用 [GNU Make](https://www.gnu.org/software/make/) 和 [Bison](https://www.gnu.org/software/bison/)。LLVM-MinGW 运行时组件的许可见第三方说明。
 
 ## 版本、贡献与许可
 
