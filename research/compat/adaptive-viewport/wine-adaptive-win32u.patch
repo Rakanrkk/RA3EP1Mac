@@ -1,0 +1,193 @@
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -37,6 +37,7 @@
+ #include "d3dkmdt.h"
+ #include "wine/wingdi16.h"
+ #include "wine/server.h"
++#include "wine/ra3_viewport.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(system);
+ 
+@@ -2025,6 +2026,45 @@
+     }
+ }
+ 
++/* Active RA3 viewport override for the isolated fullscreen candidate.
++ * RA3_SAFE_VIEWPORT takes precedence over the legacy exact "3024x1900"
++ * RA3_FIXED_VIEWPORT route: when present it must parse as a strict raw-edge
++ * spec, and an invalid value disables every override with no legacy
++ * fallback; the legacy route only stays available when the new variable is
++ * absent. */
++enum ra3_viewport_route
++{
++    RA3_VIEWPORT_NONE = 0,
++    RA3_VIEWPORT_SAFE,
++    RA3_VIEWPORT_FIXED,
++};
++
++static int ra3_viewport_route( Ra3ViewportSpec *spec )
++{
++    static int cached = -1;
++    static Ra3ViewportSpec cached_spec;
++
++    if (cached == -1)
++    {
++        const char *value = getenv( RA3_VIEWPORT_ENV );
++
++        if (value)
++        {
++            /* Boolean parse: 1 means the strict spec is valid. */
++            if (ra3_parse_viewport_spec( value, &cached_spec )) cached = RA3_VIEWPORT_SAFE;
++            else cached = RA3_VIEWPORT_NONE;
++        }
++        else
++        {
++            value = getenv( "RA3_FIXED_VIEWPORT" );
++            if (value && !strcmp( value, "3024x1900" )) cached = RA3_VIEWPORT_FIXED;
++            else cached = RA3_VIEWPORT_NONE;
++        }
++    }
++    if (spec && cached == RA3_VIEWPORT_SAFE) *spec = cached_spec;
++    return cached;
++}
++
+ static UINT add_screen_size( SIZE *sizes, UINT count, SIZE size )
+ {
+     UINT i = 0;
+@@ -2084,6 +2124,8 @@
+     };
+     UINT max_width = devmode_get( maximum, DM_PELSWIDTH ), max_height = devmode_get( maximum, DM_PELSHEIGHT );
+     SIZE *sizes, max_size = {.cx = max( max_width, max_height ), .cy = min( max_width, max_height )};
++    Ra3ViewportSpec ra3_spec;
++    int ra3_route = ra3_viewport_route( &ra3_spec );
+     const DEVMODEW *mode;
+     UINT i, count;
+ 
+@@ -2091,12 +2133,27 @@
+     if (!(sizes = malloc( count * sizeof(*sizes) ))) return NULL;
+ 
+     count = add_screen_size( sizes, 0, max_size );
+-    if (max_width >= 3024 && max_height >= 1900)
++    if (ra3_route == RA3_VIEWPORT_SAFE)
+     {
+-        const char *viewport = getenv( "RA3_FIXED_VIEWPORT" );
+-        if (viewport && !strcmp( viewport, "3024x1900" ))
+-            count += add_screen_size( sizes, count, (SIZE){3024, 1900} );
++        /* Offer the safe viewport size as a mode only when the spec's raw
++         * screen is exactly the maximum mode and the viewport stays within
++         * it; add_screen_size() keeps duplicates out and the 2-entry slack
++         * covers this one insertion. */
++        if (ra3_spec.screen_width == (int)max_width && ra3_spec.screen_height == (int)max_height)
++        {
++            int w = ra3_spec.right - ra3_spec.left, h = ra3_spec.bottom - ra3_spec.top;
++            SIZE safe = {.cx = max( w, h ), .cy = min( w, h )};
++            if (safe.cx <= max_size.cx && safe.cy <= max_size.cy)
++                count += add_screen_size( sizes, count, safe );
++        }
+     }
++    else if (ra3_route == RA3_VIEWPORT_FIXED && max_width >= 3024 && max_height >= 1900)
++    {
++        /* Legacy route only: exact "3024x1900" value with RA3_SAFE_VIEWPORT
++         * absent.  RA3_VIEWPORT_NONE (both unset, or the new value invalid)
++         * must stay stock and add nothing here. */
++        count += add_screen_size( sizes, count, (SIZE){3024, 1900} );
++    }
+     for (i = 0; i < ARRAY_SIZE(default_sizes); i++)
+     {
+         if (default_sizes[i].cx > max_size.cx || default_sizes[i].cy > max_size.cy) continue;
+@@ -2329,18 +2386,28 @@
+ 
+ /* Opt-in viewport for the isolated RA3 fullscreen candidate.  Keep the
+  * existing raw/virtual conversions and server pointer mapping; only change
+- * their destination rectangle.  Unset or unsupported displays remain stock. */
++ * their destination rectangle.  Unset or unsupported displays remain stock.
++ * The adaptive route maps the primary monitor to pos + the exclusive edges
++ * of the parsed spec, and only when the physical mode exactly matches the
++ * spec's raw screen; the legacy route keeps its centered exact 3024x1900
++ * rectangle. */
+ static BOOL ra3_fixed_viewport( struct monitor *monitor, const DEVMODEW *physical, RECT *rect )
+ {
+-    static int enabled = -1;
++    Ra3ViewportSpec spec;
++    int route = ra3_viewport_route( &spec );
+ 
+-    if (enabled == -1)
++    if (route == RA3_VIEWPORT_NONE || !is_monitor_primary( monitor )) return FALSE;
++
++    if (route == RA3_VIEWPORT_SAFE)
+     {
+-        const char *value = getenv( "RA3_FIXED_VIEWPORT" );
+-        enabled = value && !strcmp( value, "3024x1900" );
++        if (physical->dmPelsWidth != (UINT)spec.screen_width ||
++            physical->dmPelsHeight != (UINT)spec.screen_height) return FALSE;
++        SetRect( rect, physical->dmPosition.x + spec.left, physical->dmPosition.y + spec.top,
++                 physical->dmPosition.x + spec.right, physical->dmPosition.y + spec.bottom );
++        return TRUE;
+     }
+-    if (!enabled || !is_monitor_primary( monitor ) ||
+-        physical->dmPelsWidth < 3024 || physical->dmPelsHeight < 1900) return FALSE;
++
++    if (physical->dmPelsWidth < 3024 || physical->dmPelsHeight < 1900) return FALSE;
+ 
+     rect->left = physical->dmPosition.x + (physical->dmPelsWidth - 3024) / 2;
+     rect->right = rect->left + 3024;
+--- a/dlls/win32u/input.c
++++ b/dlls/win32u/input.c
+@@ -36,6 +36,7 @@
+ #include "ntuser_private.h"
+ #include "wine/server.h"
+ #include "wine/debug.h"
++#include "wine/ra3_viewport.h"
+ #include "kbd.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
+@@ -730,6 +731,33 @@
+     return ret;
+ }
+ 
++/* Native cursor poll clamp gate.  RA3_SAFE_VIEWPORT takes precedence: when
++ * present it must parse as a strict raw-edge spec or the clamp stays off
++ * with no legacy fallback; the exact "3024x1900" legacy route only applies
++ * when RA3_SAFE_VIEWPORT is absent.  The mapped monitor rect already carries
++ * the viewport geometry, so only this gate changes. */
++static int ra3_cursor_clamp_enabled( void )
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        const char *value = getenv( RA3_VIEWPORT_ENV );
++
++        if (value)
++        {
++            Ra3ViewportSpec spec;
++            enabled = ra3_parse_viewport_spec( value, &spec );
++        }
++        else
++        {
++            value = getenv( "RA3_FIXED_VIEWPORT" );
++            enabled = value && !strcmp( value, "3024x1900" );
++        }
++    }
++    return enabled;
++}
++
+ /***********************************************************************
+  *	     NtUserGetCursorPos (win32u.@)
+  */
+@@ -759,14 +787,13 @@
+         ret = user_driver->pGetCursorPos( pt );
+         if (ret)
+         {
+-            const char *viewport = getenv( "RA3_FIXED_VIEWPORT" );
+             HWND foreground = NtUserGetForegroundWindow();
+             RECT window_rect;
+             MONITORINFO monitor;
+ 
+             /* Native polling bypasses the server's clipping.  Keep a
+              * foreground fullscreen viewport at its physical input bounds. */
+-            if (viewport && !strcmp( viewport, "3024x1900" ) &&
++            if (ra3_cursor_clamp_enabled() &&
+                 foreground && is_current_process_window( foreground ) &&
+                 (NtUserGetWindowLongW( foreground, GWL_STYLE ) & WS_VISIBLE))
+             {

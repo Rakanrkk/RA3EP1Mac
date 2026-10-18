@@ -1,1 +1,0 @@
-The fixed branch is retained as a source snapshot. Use main for portable build/import tools and current release documentation. Build differences are visible through Git branch comparison; neither branch contains game assets.

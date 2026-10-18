@@ -1,4 +1,4 @@
-# Independent Uprising timing patch timing patch
+# Independent Uprising timing patch 时序补丁
 
 Source for the build-specific in-process60Hz client timing patch used by RA3Mac. It validates the supported game executable fingerprint before launch. The DLL edits process memory only; it does not rewrite the game executable.
 

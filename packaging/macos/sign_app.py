@@ -33,9 +33,10 @@ def main():
             with path.open('rb') as stream:
                 if stream.read(4) in MACH_MAGICS:
                     binaries.append(path)
-    helper = app / 'Contents/Resources/display-mode'
-    if helper.is_file():
-        binaries.append(helper)
+    for name in ('display-mode', 'display-plan'):
+        helper = app / 'Contents/Resources' / name
+        if helper.is_file():
+            binaries.append(helper)
     records = []
     for path in sorted(set(binaries), key=lambda value: len(value.parts), reverse=True):
         result = subprocess.run(['/usr/bin/codesign', '--force', '--sign', args.identity,
@@ -53,6 +54,10 @@ def main():
             for block in iter(lambda: stream.read(1024 * 1024), b''):
                 digest.update(block)
         manifest['runtime_pins'][relative] = digest.hexdigest()
+    if manifest.get('presentation') == 'safe-area-v1':
+        helper = app / 'Contents/Resources/display-plan'
+        manifest['display_plan']['sha256'] = hashlib.sha256(helper.read_bytes()).hexdigest()
+        manifest['display_plan']['bytes'] = helper.stat().st_size
     manifest['signature_policy'] = 'Local signing identity ' + args.identity + '; pins refreshed after signing'
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', args.identity, '--timestamp=none', str(app)],

@@ -1,0 +1,356 @@
+Adaptive safe-viewport macdriver delta (wine-adaptive-macdriver)
+
+Opt-in macdrv changes for RA3_SAFE_VIEWPORT (raw Wine units, exclusive
+edges, e.g. 3024x1964:0,64,3024,1964), against the accepted five-patch
+fixed-viewport tree (wine 11.0, branch tip 3562fea). Shared header
+include/wine/ra3_viewport.h is delivered separately by the candidate
+tree; this patch contains exactly the three winemac.drv file deltas:
+
+- window.c: macdrv_client_surface_update gate generalized: valid
+  RA3_SAFE_VIEWPORT -> adaptive route; present but invalid -> neither
+  adaptive nor legacy (stock); absent -> legacy exact RA3_FIXED_VIEWPORT
+  "3024x1900" route, body unchanged.
+- cocoa_window.m: setMask same gate, conversion still cgrect_mac_from_win
+  (Wine binary raw->Cocoa scaling, not screen backing scale).
+  WineMetalView opt-in backing scale: setRetinaMode re-sets contentsScale
+  to window.backingScaleFactor after super; makeBackingLayer falls back
+  to the primary screen's actual backing scale (window screen first, then
+  CGMainDisplayID identity match via NSScreenNumber); viewDidMoveToWindow
+  and viewDidChangeBackingProperties (NSView, macOS 10.7.4+) refresh it.
+  With no valid RA3_SAFE_VIEWPORT every new branch is inert.
+- display.c: ra3_adaptive_retina_2x() helper - active only when a valid
+  RA3_SAFE_VIEWPORT names the native panel size AND the live main display
+  mode is its 2x variant (rotation-normalized per 90/270 like
+  display_mode_to_devmode_fields; live mode never cached). While active,
+  retina 2x doubling is forced regardless of the startup descriptor in
+  copy_display_modes/create_mode_dict (main display only), check_retina_status,
+  find_best_display_mode, display_get_modes and display_get_current_mode.
+  Absent/invalid variable: no condition changes anywhere.
+
+Main-display-only guards in copy_display_modes/display_get_modes keep
+non-primary displays on the stock descriptor logic. No ABI/struct
+changes; mask window transform keeps the Wine 2x scale; mtld3d is
+untouched. Hotplug and mid-session display-mode changes are explicitly
+unverified.
+
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index a9fa573..817c0ca 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -29,6 +29,7 @@
+ #import "cocoa_window.h"
+ 
+ #include "macdrv_cocoa.h"
++#include "wine/ra3_viewport.h"
+ #import "cocoa_app.h"
+ #import "cocoa_event.h"
+ #import "cocoa_opengl.h"
+@@ -37,6 +38,49 @@
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+ 
++/* Adaptive safe-viewport opt-in (RA3_SAFE_VIEWPORT): TRUE while a valid
++ * viewport spec is configured, FALSE when the variable is absent or invalid.
++ * An invalid value disables both the adaptive route and the legacy
++ * RA3_FIXED_VIEWPORT fallback, matching the win32u routes. */
++static BOOL ra3_safe_viewport_valid(void)
++{
++    Ra3ViewportSpec spec;
++    const char *env = getenv(RA3_VIEWPORT_ENV);
++
++    return env && ra3_parse_viewport_spec(env, &spec);
++}
++
++
++/* Actual backing scale of the screen the view is on, or of the screen owning
++ * the main CG display when the view is not in a window yet (first layer
++ * creation). The main display is matched by the screen's NSScreenNumber
++ * device description, not the focus-dependent [NSScreen mainScreen]. Returns
++ * 0.0 when no screen matches, in which case the caller keeps the stock Wine
++ * scale. */
++static CGFloat ra3_adaptive_screen_scale(NSView* view)
++{
++    NSScreen* screen = [view window].screen;
++    CGFloat scale = 0.0;
++
++    if (!screen)
++    {
++        CGDirectDisplayID main_display = CGMainDisplayID();
++        for (NSScreen* candidate in [NSScreen screens])
++        {
++            NSNumber* display_id = [candidate.deviceDescription objectForKey:@"NSScreenNumber"];
++            if (display_id && (CGDirectDisplayID)[display_id unsignedIntValue] == main_display)
++            {
++                screen = candidate;
++                break;
++            }
++        }
++    }
++
++    if (screen) scale = [screen backingScaleFactor];
++    return scale;
++}
++
++
+ @interface NSWindow (PrivatePreventsActivation)
+ 
+ /* Needed to ensure proper behavior after adding or removing
+@@ -985,6 +1029,11 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
+     {
+         self.layer.contentsScale = mode ? 2.0 : 1.0;
+         [super setRetinaMode:mode];
++        /* Adaptive opt-in: track the actual backing scale so the Metal
++           drawable (layer.bounds * contentsScale) follows the screen instead
++           of the Wine binary 2x/1x assumption. */
++        if (ra3_safe_viewport_valid() && self.window)
++            self.layer.contentsScale = self.window.backingScaleFactor;
+     }
+ 
+     - (CALayer*) makeBackingLayer
+@@ -995,9 +1044,30 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
+         layer.magnificationFilter = kCAFilterNearest;
+         layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+         layer.contentsScale = retina_on ? 2.0 : 1.0;
++        /* Adaptive opt-in: create the first layer at the primary screen's
++           actual backing scale to match the planned drawable. */
++        if (ra3_safe_viewport_valid())
++        {
++            CGFloat scale = ra3_adaptive_screen_scale(self);
++            if (scale > 0.0) layer.contentsScale = scale;
++        }
+         return layer;
+     }
+ 
++    - (void) viewDidMoveToWindow
++    {
++        [super viewDidMoveToWindow];
++        if (ra3_safe_viewport_valid() && self.window)
++            self.layer.contentsScale = self.window.backingScaleFactor;
++    }
++
++    - (void) viewDidChangeBackingProperties
++    {
++        [super viewDidChangeBackingProperties];
++        if (ra3_safe_viewport_valid() && self.window)
++            self.layer.contentsScale = self.window.backingScaleFactor;
++    }
++
+     - (BOOL) isOpaque
+     {
+         return YES;
+@@ -2878,9 +2948,16 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
+             return;
+ 
+         /* The candidate's mask arrives in raw display pixels, while the
+-         * shape path uses window-local Cocoa points. */
+-        const char *viewport = getenv("RA3_FIXED_VIEWPORT");
+-        if (viewport && !strcmp(viewport, "3024x1900"))
++         * shape path uses window-local Cocoa points. Adaptive opt-in: a
++         * valid RA3_SAFE_VIEWPORT takes this route; if it is present but
++         * invalid, neither it nor the legacy RA3_FIXED_VIEWPORT fallback
++         * applies (stock behaviour). The legacy exact route stays available
++         * only while the new variable is absent. The conversion keeps the
++         * Wine binary raw-to-Cocoa scaling (cgrect_mac_from_win), not the
++         * screen's actual backing scale. */
++        const char *safe_viewport = getenv(RA3_VIEWPORT_ENV);
++        const char *viewport = safe_viewport ? NULL : getenv("RA3_FIXED_VIEWPORT");
++        if (ra3_safe_viewport_valid() || (viewport && !strcmp(viewport, "3024x1900")))
+         {
+             NSRect maskRect = NSRectFromCGRect(cgrect_mac_from_win(rect));
+             [[WineApplicationController sharedController] flipRect:&maskRect];
+diff --git a/dlls/winemac.drv/display.c b/dlls/winemac.drv/display.c
+index 2663eb8..5832501 100644
+--- a/dlls/winemac.drv/display.c
++++ b/dlls/winemac.drv/display.c
+@@ -31,6 +31,7 @@
+ #include "ddrawi.h"
+ #define WIN32_NO_STATUS
+ #include "winternl.h"
++#include "wine/ra3_viewport.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(display);
+ 
+@@ -444,6 +445,56 @@ static int get_default_bpp(void)
+ }
+ 
+ 
++/* Adaptive safe-viewport opt-in (RA3_SAFE_VIEWPORT).
++ *
++ * The raw monitor extents exposed to Wine come from NSScreen.frame scaled by
++ * the retina factor, while the DEVMODE dimensions double
++ * CGDisplayModeGetWidth()/GetHeight() only when a mode matches the descriptor
++ * captured at startup. When the live mode no longer matches that descriptor
++ * (scaled resolutions, or the mode changed after startup), the doubled
++ * dimensions disagree with the raw extents.
++ *
++ * While a valid RA3_SAFE_VIEWPORT selects the native panel size and the main
++ * display's CURRENT mode is the retina 2x variant of that size, callers may
++ * force the retina 2x dimensions for the main display regardless of the
++ * startup descriptor. Like display_mode_to_devmode_fields, the comparison is
++ * normalized for 90/270 display rotation by swapping the mode dimensions.
++ * The live mode is re-checked on every call (never cached), so a later mode
++ * change silently reverts to the stock descriptor-based behaviour. With
++ * RA3_SAFE_VIEWPORT absent or invalid this always returns FALSE. */
++static BOOL ra3_adaptive_retina_2x(void)
++{
++    Ra3ViewportSpec spec;
++    const char *env = getenv(RA3_VIEWPORT_ENV);
++    CGDisplayModeRef mode;
++    BOOL ret = FALSE;
++
++    if (!env || !ra3_parse_viewport_spec(env, &spec) || !retina_enabled)
++        return FALSE;
++
++    mode = CGDisplayCopyDisplayMode(kCGDirectMainDisplay);
++    if (mode)
++    {
++        /* Rotation quadrant as computed by display_mode_to_devmode_fields. */
++        double rotation = CGDisplayRotation(kCGDirectMainDisplay);
++        int quadrant = ((int)((rotation / 90) + 0.5)) % 4;
++        size_t width = CGDisplayModeGetWidth(mode) * 2;
++        size_t height = CGDisplayModeGetHeight(mode) * 2;
++        CGDisplayModeRelease(mode);
++
++        if (quadrant == 1 || quadrant == 3)
++        {
++            size_t swap = width;
++            width = height;
++            height = swap;
++        }
++
++        ret = (size_t)spec.screen_width == width && (size_t)spec.screen_height == height;
++    }
++    return ret;
++}
++
++
+ static CFDictionaryRef create_mode_dict(CGDisplayModeRef display_mode, BOOL is_original)
+ {
+     CFDictionaryRef ret;
+@@ -649,6 +700,7 @@ static CFArrayRef copy_display_modes(CGDirectDisplayID display, BOOL include_uns
+     CFMutableDictionaryRef modes_by_size;
+     CFIndex i, count;
+     CGDisplayModeRef* mode_array;
++    BOOL force_retina_2x;
+ 
+     options = CFDictionaryCreate(NULL, (const void**)&kCGDisplayShowDuplicateLowResolutionModes,
+                                  (const void**)&kCFBooleanTrue, 1, &kCFTypeDictionaryKeyCallBacks,
+@@ -661,13 +713,14 @@ static CFArrayRef copy_display_modes(CGDirectDisplayID display, BOOL include_uns
+         return NULL;
+ 
+     desc = create_original_display_mode_descriptor(display);
++    force_retina_2x = (display == kCGDirectMainDisplay) && ra3_adaptive_retina_2x();
+ 
+     modes_by_size = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+     count = CFArrayGetCount(modes);
+     for (i = 0; i < count; i++)
+     {
+         CGDisplayModeRef new_mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+-        BOOL new_is_original = display_mode_matches_descriptor(new_mode, desc);
++        BOOL new_is_original = display_mode_matches_descriptor(new_mode, desc) || force_retina_2x;
+         CFDictionaryRef key = create_mode_dict(new_mode, new_is_original);
+         CGDisplayModeRef old_mode = (CGDisplayModeRef)CFDictionaryGetValue(modes_by_size, key);
+ 
+@@ -706,7 +759,7 @@ void check_retina_status(void)
+     {
+         struct display_mode_descriptor* desc = create_original_display_mode_descriptor(kCGDirectMainDisplay);
+         CGDisplayModeRef mode = CGDisplayCopyDisplayMode(kCGDirectMainDisplay);
+-        BOOL new_value = display_mode_matches_descriptor(mode, desc);
++        BOOL new_value = display_mode_matches_descriptor(mode, desc) || ra3_adaptive_retina_2x();
+ 
+         CGDisplayModeRelease(mode);
+         free_display_mode_descriptor(desc);
+@@ -729,6 +782,7 @@ static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef dis
+ {
+     CFIndex count, i, best;
+     CGDisplayModeRef best_display_mode;
++    BOOL force_retina_2x = ra3_adaptive_retina_2x();
+ 
+     best_display_mode = NULL;
+ 
+@@ -745,7 +799,7 @@ static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef dis
+         if (!refresh_rate)
+             refresh_rate = 60;
+ 
+-        if (is_original && retina_enabled)
++        if ((is_original && retina_enabled) || force_retina_2x)
+         {
+             width *= 2;
+             height *= 2;
+@@ -854,6 +908,7 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+     struct display_mode_descriptor *desc;
+     DEVMODEW *devmodes;
+     CFArrayRef modes;
++    BOOL force_retina_2x;
+ 
+     modes = copy_display_modes(display_id, TRUE);
+     if (!modes)
+@@ -877,6 +932,7 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+     }
+ 
+     desc = create_original_display_mode_descriptor(display_id);
++    force_retina_2x = (display_id == kCGDirectMainDisplay) && ra3_adaptive_retina_2x();
+     for (i = 0; i < count; i++)
+     {
+         CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+@@ -886,7 +942,7 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+ 
+         display_mode_to_devmode_fields(display_id, mode, devmodes + i);
+ 
+-        if (retina_enabled && display_mode_matches_descriptor(mode, desc))
++        if ((retina_enabled && display_mode_matches_descriptor(mode, desc)) || force_retina_2x)
+         {
+             devmodes[i].dmPelsWidth *= 2;
+             devmodes[i].dmPelsHeight *= 2;
+@@ -933,7 +989,8 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
+     if (retina_enabled)
+     {
+         struct display_mode_descriptor *desc = create_original_display_mode_descriptor(display_id);
+-        if (display_mode_matches_descriptor(display_mode, desc))
++        if (display_mode_matches_descriptor(display_mode, desc) ||
++            (display_id == kCGDirectMainDisplay && ra3_adaptive_retina_2x()))
+         {
+             devmode->dmPelsWidth *= 2;
+             devmode->dmPelsHeight *= 2;
+diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
+index 6f02134..1226e24 100644
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -36,6 +36,7 @@
+ 
+ #include "macdrv.h"
+ #include "wine/server.h"
++#include "wine/ra3_viewport.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
+ 
+@@ -1186,10 +1187,26 @@ static void macdrv_client_surface_update(struct client_surface *client)
+     if (!(data = get_win_data(toplevel))) return;
+     if (hwnd == toplevel)
+     {
+-        const char *viewport = getenv("RA3_FIXED_VIEWPORT");
+-        if (viewport && !strcmp(viewport, "3024x1900"))
++        /* Adaptive safe-viewport opt-in: a valid RA3_SAFE_VIEWPORT takes the
++         * adaptive route; if it is present but invalid, neither it nor the
++         * legacy RA3_FIXED_VIEWPORT fallback applies (stock behaviour). The
++         * legacy exact route stays available only while the new variable is
++         * absent. Either way, win32u has already mapped the top-level client
++         * to the planned viewport. */
++        Ra3ViewportSpec spec;
++        BOOL trusted_client_rect;
++        const char *safe_viewport = getenv(RA3_VIEWPORT_ENV);
++
++        if (safe_viewport)
++            trusted_client_rect = ra3_parse_viewport_spec(safe_viewport, &spec);
++        else
++        {
++            const char *viewport = getenv("RA3_FIXED_VIEWPORT");
++            trusted_client_rect = viewport && !strcmp(viewport, "3024x1900");
++        }
++
++        if (trusted_client_rect)
+         {
+-            /* win32u already mapped the top-level client to the fixed viewport. */
+             SetRect(&rect, 0, 0, data->rects.client.right - data->rects.client.left,
+                     data->rects.client.bottom - data->rects.client.top);
+         }

@@ -1,4 +1,5 @@
-# Fixed App packaging
+# macOS packaging
 
-Build the native Launcher.swift with Swift/AppKit, then supply a prepared fixed Wine/prefix tree to build_app.py.
-This archived builder expects the original fixed-runtime input layout. See main for current portable import/build tools.
+See[the build guide](../../docs/BUILDING.md) for prepared-input import, pinned Wine source patching, native module builds, signing and DMG packaging.
+
+`release_build.py --help` lists portable build options. All output targets must be new paths. Tools never install or start the game implicitly.

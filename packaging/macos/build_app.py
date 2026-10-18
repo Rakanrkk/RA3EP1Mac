@@ -32,6 +32,18 @@ Z:\\Users ref aborts. Unknown external symlinks abort. Launcher compilation and
 codesign are out of scope; pins record pre-codesign identity and are refreshed
 by the packaging sign step before outer codesign.
 
+Candidate packaging options: --presentation fixed (default) keeps every piece
+of existing metadata unchanged. --presentation safe-area builds the adaptive
+candidate: it emits manifest presentation "safe-area-v1", requires the
+dedicated bundle id org.ra3mac.UprisingMetal.Adaptive (separate Application
+Support container from the default bundle), and copies the native display-plan
+helper (--display-plan, required) to Resources/display-plan as an executable
+Mach-O. The helper is staged unsigned and unlinked here; the packaging sign
+step owns linking and codesigning it. Only two launchable bundle ids exist
+(the compiled launchers hard-code exactly these), so every other id is refused
+before any output directory is created. --audio-module stays a per-build input
+passed through unchanged; no audio behavior differs between candidates.
+
 Usage: python3 -I packaging/macos/build_app.py --output /tmp/X.app --icon X.icns
 """
 import argparse, ctypes, ctypes.util, errno, fnmatch, hashlib, json, os, plistlib, re, shutil, stat, sys, time
@@ -44,6 +56,9 @@ DEFAULT_LAUNCHER = BUILD / "app-package-tools" / "RA3Launcher"
 DEFAULT_HELPER = BUILD / "compat-display-recovery" / "display-mode"
 REPORTS = BUILD / "app-package-reports"
 SCHEMA, BUNDLE_ID, APP_NAME = "ra3mac-app-v1", "org.ra3mac.UprisingMetal", "红警3：起义时刻"
+ADAPTIVE_BUNDLE_ID = "org.ra3mac.UprisingMetal.Adaptive"  # safe-area candidate identity
+PRESENTATION_SAFE_AREA = "safe-area-v1"  # manifest presentation value for adaptive builds
+BUNDLE_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+")
 APP_BUILD = "2"  # matches the installed build-2 Info.plist (CFBundleVersion)
 AUDIO_PIN = "lib/wine/x86_64-unix/winecoreaudio.so"
 DEFAULT_AUDIO_MODULE = (BUILD / "compat-fixed-viewport" / "wine-build" /
@@ -159,6 +174,53 @@ def overlay_audio_module(res: Path, module: Path, prov: dict, log: list) -> None
                 "replaced_sha256": replaced, "env": prov["env"],
                 "note": "exact locally built disabled-capture module; "
                         "accepted runtime root keeps its original"})
+
+def validate_options(bundle_id: str, presentation: str, display_plan) -> None:
+    """Candidate option contract, enforced before any output directory exists.
+
+    The compiled launchers hard-code exactly two bundle identities, so the
+    builder refuses every other id rather than emitting an unlaunchable bundle:
+    org.ra3mac.UprisingMetal with --presentation fixed, and
+    org.ra3mac.UprisingMetal.Adaptive with --presentation safe-area (which also
+    requires --display-plan). bundle-id is additionally checked as a strict
+    reverse-DNS name (letter-started dot segments, no path or special
+    characters).
+    """
+    if presentation not in ("fixed", "safe-area"):
+        raise BuildError(f"--presentation must be fixed or safe-area, got {presentation!r}")
+    if not BUNDLE_ID_RE.fullmatch(bundle_id):
+        raise BuildError(f"--bundle-id is not a strict reverse-DNS name (letters, digits "
+                         f"and hyphens only, no path characters): {bundle_id!r}")
+    if presentation == "safe-area":
+        if bundle_id != ADAPTIVE_BUNDLE_ID:
+            raise BuildError(f"--presentation safe-area requires --bundle-id "
+                             f"{ADAPTIVE_BUNDLE_ID}; the only accepted ids are "
+                             f"{BUNDLE_ID} (fixed) and {ADAPTIVE_BUNDLE_ID} (safe-area)")
+        if display_plan is None:
+            raise BuildError("--presentation safe-area requires --display-plan "
+                             "<native display-plan helper binary>")
+    elif bundle_id != BUNDLE_ID:
+        raise BuildError(f"--presentation fixed requires --bundle-id {BUNDLE_ID}; the only "
+                         f"accepted ids are {BUNDLE_ID} (fixed) and "
+                         f"{ADAPTIVE_BUNDLE_ID} (safe-area)")
+
+def display_plan_provenance(src) -> dict:
+    """Validate the safe-area native display-plan helper before staging.
+
+    The source is only read, never mutated: it must exist, carry the
+    executable bit, and be a Mach-O image (fixtures may be fake bytes as long
+    as the magic is real, matching the audio-module contract). Linking and
+    codesigning stay with the packaging sign step.
+    """
+    if src is None or not src.is_file():
+        raise BuildError(f"display-plan helper missing: {src}")
+    data = src.read_bytes()
+    if data[:4] not in MACHO_MAGICS:
+        raise BuildError(f"display-plan helper is not a Mach-O image: {src}")
+    if not os.access(src, os.X_OK):
+        raise BuildError(f"display-plan helper is not executable: {src}")
+    return {"resource": "Resources/display-plan",
+            "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
 def remediate_fonts(pt: Path, wine_src: Path, home: Path, log: list) -> dict:
     """Materialize registry-referenced fonts into C:\\windows\\Fonts; rewrite refs.
@@ -327,6 +389,12 @@ INFO_PLIST = {
     "LSMultipleInstancesProhibited": True, "NSHighResolutionCapable": True,
 }
 
+def info_plist(bundle_id: str) -> dict:
+    """Fresh per-build Info.plist copy; never mutates the module-level template."""
+    pl = dict(INFO_PLIST)
+    pl["CFBundleIdentifier"] = bundle_id
+    return pl
+
 DELIVERY = """红警3：起义时刻（本地交付）
 Stack: Rosetta/WoW64 + Wine (cx-26.3.0-7, fixed-viewport patches) + mtld3d v0.13.0 D3D9->Metal.
 Original Windows engine and payload identity preserved; RGBA8 Bloom/Glow-fix-v1 resources kept.
@@ -346,10 +414,23 @@ def build_app(args, home: Path = None) -> Path:
     home = Path(home or Path.home()).resolve()
     amod = Path(args.audio_module).resolve()
     apatch = Path(args.audio_patch).resolve()
+    # Candidate options are read through getattr so callers/tests that predate
+    # them keep building the unchanged default (fixed) bundle.
+    bundle_id = getattr(args, "bundle_id", BUNDLE_ID)
+    presentation = getattr(args, "presentation", "fixed")
+    dplan = getattr(args, "display_plan", None)
+    dplan_src = Path(dplan).resolve() if dplan else None
+    # Refuse invalid candidate contracts before creating anything on disk.
+    validate_options(bundle_id, presentation, dplan_src)
+    dprov = display_plan_provenance(dplan_src) if presentation == "safe-area" else None
     prov = audio_provenance(amod, apatch)
     report = {"schema": SCHEMA, "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "output": str(out),
-              "runtime_root": str(rt), "actions": [], "clone": {}, "pins": {}, "fonts": {},
+              "runtime_root": str(rt),
+              "presentation": {"mode": presentation, "bundle_id": bundle_id},
+              "actions": [], "clone": {}, "pins": {}, "fonts": {},
               "audio": {**prov, "source_module": str(amod), "source_patch": str(apatch)}}
+    if dprov is not None:
+        report["display_plan_source"] = str(dplan_src)
     if out.suffix != ".app":
         raise BuildError(f"--output must end in .app: {out}")
     if out.exists():
@@ -395,11 +476,14 @@ def build_app(args, home: Path = None) -> Path:
         report["source_stats"] = {"wine": tree_stats(wine_src), "prefix": tree_stats(prefix_src)}
         font_pins = remediate_prefix(pt, wine_src, home, report["actions"])
         report["fonts"] = font_pins
+        layout = {"wine": "Resources/wine", "prefix_template": "Resources/prefix-template",
+                  "display_helper": "Resources/display-mode"}
+        if dprov is not None:
+            layout["display_plan"] = "Resources/display-plan"
         mres = {"schema": SCHEMA, "version": "1.0",
-                "bundle": {"id": BUNDLE_ID, "name": APP_NAME, "executable": "RA3Launcher",
+                "bundle": {"id": bundle_id, "name": APP_NAME, "executable": "RA3Launcher",
                            "short_version": "1.0", "build_version": APP_BUILD},
-                "layout": {"wine": "Resources/wine", "prefix_template": "Resources/prefix-template",
-                           "display_helper": "Resources/display-mode"},
+                "layout": layout,
                 "pin_roots": {"runtime": "Resources/wine",
                               "game": "Resources/prefix-template/drive_c/ra3-mtld3d",
                               "payload": "Resources/prefix-template/drive_c/u60-mtld3d",
@@ -415,14 +499,23 @@ def build_app(args, home: Path = None) -> Path:
                 "audio_capture": AUDIO_CAPTURE_FIELD,
                 "privacy_usage_requests": PRIVACY_FIELD,
                 "audio": prov}
+        if presentation == "safe-area":
+            mres["presentation"] = PRESENTATION_SAFE_AREA
+            mres["display_plan"] = dprov
         mres["_runtime_root"] = str(rt)  # audit input only; removed before write
         audit(pt, out, mres, report["actions"])
         del mres["_runtime_root"]
         (res / "manifest.json").write_text(json.dumps(mres, ensure_ascii=False, indent=1) + "\n")
-        plistlib.dump(INFO_PLIST, (out / "Contents/Info.plist").open("wb"))
+        plistlib.dump(info_plist(bundle_id), (out / "Contents/Info.plist").open("wb"))
         (res / "Delivery.txt").write_text(DELIVERY, encoding="utf-8")
         shutil.copy2(helper, res / "display-mode")
         os.chmod(res / "display-mode", 0o755)
+        if dprov is not None:
+            # Native display-plan helper for the safe-area candidate only:
+            # staged as an executable copy, unsigned and unlinked; the
+            # packaging sign step owns linking and codesigning it.
+            shutil.copy2(dplan_src, res / "display-plan")
+            os.chmod(res / "display-plan", 0o755)
         if icon is not None:
             shutil.copy2(icon, res / "AppIcon.icns")
         if launcher.is_file():
@@ -459,6 +552,15 @@ def main(argv=None) -> int:
                     help="no-capture patch file recorded as audio provenance")
     ap.add_argument("--prepare-layout", action="store_true",
                     help="stage the bundle without the launcher; not launchable")
+    ap.add_argument("--bundle-id", default=BUNDLE_ID,
+                    help=f"bundle identity; only {BUNDLE_ID} (fixed) and "
+                         f"{ADAPTIVE_BUNDLE_ID} (safe-area) are accepted")
+    ap.add_argument("--presentation", choices=("fixed", "safe-area"), default="fixed",
+                    help="fixed = existing metadata unchanged; safe-area = adaptive "
+                         f"candidate with manifest presentation {PRESENTATION_SAFE_AREA}")
+    ap.add_argument("--display-plan", default=None,
+                    help="native display-plan helper binary (required with --presentation "
+                         "safe-area; copied to Resources/display-plan, linked by the sign step)")
     args = ap.parse_args(argv)
     try:
         rp = build_app(args)

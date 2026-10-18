@@ -1,6 +1,6 @@
 # Changelog
 
-##1.1.0—Adaptive display edition
+## 1.1.0
 
 - Derive the fullscreen safe viewport from the primary display frame and safe-area
   insets rather than a single fixed3024×1900 target.
@@ -19,7 +19,7 @@ Other displays, rotated/multi-monitor configurations and older macOS runtime
 versions remain outside physical-device verification. Exit and relaunch after
 changing the primary display or display scaling during play.
 
-##1.0.0—Fixed viewport edition
+## 1.0.0
 
 The `archive/fixed-viewport` branch preserves the earlier locally accepted
 3024×1900 Metal viewport, whole-screen input window and bottom-mask correction.

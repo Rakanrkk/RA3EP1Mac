@@ -14,6 +14,44 @@ struct Manifest: Decodable {
     let runtime_pins: [String: String]
     let game_pins: [String: String]
     let payload_pins: [String: String]
+    let presentation: String?
+    let display_plan: DisplayPlanComponent?
+}
+
+struct DisplayPlanComponent: Decodable {
+    let sha256: String
+}
+
+struct AdaptiveDisplayPlan: Decodable, Equatable {
+    let environment: [String: String]
+    let screen_width: Int
+    let screen_height: Int
+    let left: Int
+    let top: Int
+    let right: Int
+    let bottom: Int
+    let viewport_width: Int
+    let viewport_height: Int
+    let drawable_width: Int
+    let drawable_height: Int
+    let display_id: UInt32
+
+    func viewportEnvironment() throws -> [String: String] {
+        guard screen_width > 0, screen_height > 0, screen_width <= 32768, screen_height <= 32768,
+              left >= 0, top >= 0, right > left, bottom > top,
+              right <= screen_width, bottom <= screen_height,
+              right - left >= 320, bottom - top >= 200,
+              viewport_width == right - left, viewport_height == bottom - top,
+              drawable_width > 0, drawable_height > 0,
+              drawable_width <= 32768, drawable_height <= 32768 else {
+            throw LaunchError("显示器安全区域无效，请重新启动应用。")
+        }
+        let spec = "\(screen_width)x\(screen_height):\(left),\(top),\(right),\(bottom)"
+        guard environment == ["RA3_SAFE_VIEWPORT": spec] else {
+            throw LaunchError("显示适配参数不完整。")
+        }
+        return environment
+    }
 }
 
 let fm = FileManager.default
@@ -69,6 +107,7 @@ final class GameLauncher {
     let support: URL
     let prefix: URL
     var lockFD: Int32 = -1
+    var newlyPreparedPlan: AdaptiveDisplayPlan?
 
     init() throws {
         guard let resourceURL = Bundle.main.resourceURL else { throw LaunchError("应用资源目录缺失。") }
@@ -90,6 +129,15 @@ final class GameLauncher {
             guard fm.isExecutableFile(atPath: resources.appendingPathComponent(relative).path) else {
                 throw LaunchError("可执行组件缺失：\(relative)")
             }
+        }
+        if manifest.presentation == "safe-area-v1" {
+            guard fm.isExecutableFile(atPath: resources.appendingPathComponent("display-plan").path),
+                  let component = manifest.display_plan else {
+                throw LaunchError("自适应显示组件缺失。")
+            }
+            try verify(["display-plan": component.sha256], under: resources)
+        } else if let presentation = manifest.presentation, presentation != "fixed" {
+            throw LaunchError("不支持的显示适配版本。")
         }
     }
 
@@ -124,6 +172,44 @@ final class GameLauncher {
         }
     }
 
+    func displayPlan() throws -> (AdaptiveDisplayPlan, Data) {
+        let (status, output) = try capture(resources.appendingPathComponent("display-plan"), [])
+        guard status == 0, let data = output.data(using: .utf8) else {
+            throw LaunchError("无法读取显示器安全区域：\(output)")
+        }
+        let plan = try JSONDecoder().decode(AdaptiveDisplayPlan.self, from: data)
+        _ = try plan.viewportEnvironment()
+        return (plan, data)
+    }
+
+    func initializeAdaptiveResolution(in directory: URL) throws {
+        guard manifest.presentation == "safe-area-v1" else { return }
+        let (plan, _) = try displayPlan()
+        newlyPreparedPlan = plan
+        let users = directory.appendingPathComponent("drive_c/users", isDirectory: true)
+        guard let enumerator = fm.enumerator(at: users, includingPropertiesForKeys: [.isSymbolicLinkKey],
+                                             options: [.skipsHiddenFiles]) else {
+            throw LaunchError("无法读取新游戏档案。")
+        }
+        var configured = 0
+        while let file = enumerator.nextObject() as? URL {
+            let metadata = try file.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if metadata.isSymbolicLink == true { enumerator.skipDescendants(); continue }
+            guard file.lastPathComponent == "Options.ini", file.path.contains("/Profiles/") else { continue }
+            let original = try String(contentsOf: file, encoding: .utf8)
+            let expression = try NSRegularExpression(pattern: "(?m)^Resolution[ \\t]*=[^\\r\\n]*$")
+            let range = NSRange(original.startIndex..<original.endIndex, in: original)
+            guard expression.numberOfMatches(in: original, range: range) == 1 else {
+                throw LaunchError("新游戏档案缺少唯一的分辨率配置。")
+            }
+            let updated = expression.stringByReplacingMatches(in: original, range: range,
+                withTemplate: "Resolution = \(plan.drawable_width) \(plan.drawable_height)")
+            try updated.write(to: file, atomically: true, encoding: .utf8)
+            configured += 1
+        }
+        guard configured > 0 else { throw LaunchError("新游戏数据缺少可初始化的档案。") }
+    }
+
     func preparePrefix() throws {
         for item in try fm.contentsOfDirectory(at: support, includingPropertiesForKeys: nil) {
             if item.lastPathComponent.hasPrefix("prefix-preparing-") && item.lastPathComponent.count == 53 {
@@ -152,6 +238,7 @@ final class GameLauncher {
             try prepareDrives(staging)
             try verify(manifest.game_pins, under: staging.appendingPathComponent("drive_c/ra3-mtld3d"))
             try verify(manifest.payload_pins, under: staging.appendingPathComponent("drive_c/u60-mtld3d"))
+            try initializeAdaptiveResolution(in: staging)
             try writeJSON(["version": manifest.version, "created": ISO8601DateFormatter().string(from: Date())],
                           to: staging.appendingPathComponent(".ra3mac-ready.json"))
             try fm.moveItem(at: staging, to: prefix)
@@ -196,14 +283,34 @@ final class GameLauncher {
         let wine = runtime.appendingPathComponent("bin/wine")
         let helper = resources.appendingPathComponent("display-mode")
         let snapshot = session.appendingPathComponent("desktop-before.json")
-        let environment = ["HOME": session.appendingPathComponent("home").path,
+        var environment = ["HOME": session.appendingPathComponent("home").path,
                            "USER": NSUserName(), "LOGNAME": NSUserName(),
                            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": session.path,
                            "WINEPREFIX": prefix.path, "WINEARCH": "win64", "WINEMSYNC": "1",
                            "WINEDLLOVERRIDES": "mscoree,mshtml=", "WINEDEBUG": "-all",
                            "RA3_FIXED_VIEWPORT": "3024x1900", "RA3_NO_AUDIO_CAPTURE": "1"]
+        var viewport = "3024x1900"
+        var adaptivePlan: AdaptiveDisplayPlan?
+        if manifest.presentation == "safe-area-v1" {
+            let (plan, planData) = try displayPlan()
+            if let initial = newlyPreparedPlan, initial != plan {
+                throw LaunchError("首次准备期间显示配置已变化，请重新打开应用。游戏数据已保留。")
+            }
+            adaptivePlan = plan
+            environment.removeValue(forKey: "RA3_FIXED_VIEWPORT")
+            environment.merge(try plan.viewportEnvironment()) { _, new in new }
+            viewport = "\(plan.viewport_width)x\(plan.viewport_height)"
+            try planData.write(to: session.appendingPathComponent("display-plan.json"), options: .withoutOverwriting)
+        }
         let (snapshotStatus, snapshotOutput) = try capture(helper, ["snapshot", snapshot.path])
         guard snapshotStatus == 0 else { throw LaunchError("无法保存桌面显示模式：\(snapshotOutput)") }
+        if let plan = adaptivePlan {
+            let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: snapshot)) as? [String: Any]
+            guard (saved?["displayID"] as? NSNumber)?.uint32Value == plan.display_id,
+                  (try displayPlan()).0 == plan else {
+                throw LaunchError("保存显示模式时主显示配置发生变化，请重新打开应用。")
+            }
+        }
         defer {
             do {
                 if try !gameRunning() {
@@ -216,7 +323,8 @@ final class GameLauncher {
         let arguments = ["C:\\" + payloadName + "\\Uprising60.exe", "C:\\ra3-mtld3d",
                          "C:\\" + payloadName + "\\uprising60.dll"]
         try writeJSON(["version": manifest.version, "runtime": "Rosetta/WoW64 + Wine + mtld3d0.13.0",
-                       "viewport": "3024x1900", "prefix": prefix.path, "runtime_bundle": runtime.path,
+                       "viewport": viewport, "presentation": manifest.presentation ?? "fixed",
+                       "prefix": prefix.path, "runtime_bundle": runtime.path,
                        "arguments": arguments, "patch_log": payload.appendingPathComponent("uprising60.log").path,
                        "automatic_termination": false], to: session.appendingPathComponent("session.json"))
         let logURL = session.appendingPathComponent("wine.log")
@@ -332,7 +440,7 @@ if launcherArguments == ["--help"] || launcherArguments == ["-h"] {
     }
 } else {
     guard Bundle.main.bundleURL.pathExtension == "app",
-          Bundle.main.bundleIdentifier == "org.ra3mac.UprisingMetal" else {
+          ["org.ra3mac.UprisingMetal", "org.ra3mac.UprisingMetal.Adaptive"].contains(Bundle.main.bundleIdentifier ?? "") else {
         FileHandle.standardError.write(Data("请从应用程序打开红警3起义时刻.app；独立启动器文件不能直接运行。\n".utf8))
         exit(2)
     }

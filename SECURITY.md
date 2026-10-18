@@ -9,5 +9,5 @@ sandbox for untrusted executables or mods. Only use a trusted game installation
 and runtime. The output-only Wine backend disables microphone capture for this
 package; no microphone permission is needed.
 
-Checksums validate release file integrity. A local Apple Development signature
+Checksums validate release file integrity. An ad-hoc integrity signature
 is not Developer ID notarization and does not replace normal macOS trust checks.

@@ -1,0 +1,21 @@
+name: Source checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  offline:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Offline geometry, launcher and packaging gates
+        run: python3 -I -B research/compat/adaptive-viewport/run_checks.py
+      - name: Portable import and release builder
+        run: |
+          python3 -I -B packaging/macos/test_import_runtime.py
+          python3 -I -B packaging/macos/test_release_build.py
+      - name: Synthetic resource compatibility checks
+        run: python3 -I -B packaging/resources/test_compat_resources.py

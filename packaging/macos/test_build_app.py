@@ -6,7 +6,15 @@ symlink and the ORIGINAL runtime winecoreaudio module, prefix with dosdevices
 (internal, z:/, stale volume/device links), test-owned/u60 session dirs,
 escaped-dos registry font refs, and the candidate manifest pin contract. The
 built disabled-capture audio fixture carries a Mach-O magic plus the
-RA3_NO_AUDIO_CAPTURE marker, exactly what build_app validates. Run with:
+RA3_NO_AUDIO_CAPTURE marker, exactly what build_app validates. Candidate
+packaging is covered offline too: the default fixed build must keep every
+piece of existing metadata unchanged (and stage no display-plan helper), the
+safe-area candidate must use exactly org.ra3mac.UprisingMetal.Adaptive, emit
+presentation safe-area-v1, stage an executable display-plan copy without
+mutating its source or the module-level Info.plist template, and every invalid
+contract (missing helper, wrong/arbitrary/reused id, non-Mach-O, not
+executable, path-character id) must abort before any output directory exists.
+Run with:
 python3 -I test_build_app.py
 """
 import hashlib, json, os, plistlib, shutil, subprocess, sys, tempfile
@@ -17,6 +25,7 @@ import build_app as B  # noqa: E402
 
 AUDIO_BYTES = b"\xcf\xfa\xed\xfe" + b"RA3_NO_AUDIO_CAPTURE-DISABLED-CAPTURE-BIN"
 ORIGINAL_AUDIO_BYTES = b"ORIGINAL-WINECOREAUDIO"
+DPLAN_BYTES = b"\xcf\xfa\xed\xfe" + b"RA3-NATIVE-DISPLAY-PLAN-HELPER-FAKE"
 
 def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
@@ -78,12 +87,23 @@ def make_source(root: Path, home: Path):
     (root / "candidate-manifest.json").write_text(json.dumps(manifest))
     return manifest
 
-def args_for(root, out, launcher, icon, helper, prepare=False, audio=None, patch=None):
+def args_for(root, out, launcher, icon, helper, prepare=False, audio=None, patch=None,
+             bundle_id=None, presentation=None, display_plan=None):
     import argparse
-    return argparse.Namespace(output=str(out), icon=str(icon), runtime_root=str(root),
-                              launcher=str(launcher), display_helper=str(helper),
-                              prepare_layout=prepare, audio_module=str(audio),
-                              audio_patch=str(patch))
+    ns = argparse.Namespace(output=str(out), icon=str(icon), runtime_root=str(root),
+                            launcher=str(launcher), display_helper=str(helper),
+                            prepare_layout=prepare, audio_module=str(audio),
+                            audio_patch=str(patch))
+    # The candidate options are attached only when explicitly requested, so
+    # default-path callers keep a Namespace WITHOUT these attributes and
+    # exercise build_app's getattr defaults (compat contract).
+    if bundle_id is not None:
+        ns.bundle_id = bundle_id
+    if presentation is not None:
+        ns.presentation = presentation
+    if display_plan is not None:
+        ns.display_plan = str(display_plan)
+    return ns
 
 def main() -> int:
     base = Path(tempfile.mkdtemp(prefix="ra3build-test-"))
@@ -99,6 +119,11 @@ def main() -> int:
     amod, apatch = fixtures / "winecoreaudio.so", fixtures / "wine-no-audio-capture.patch"
     amod.write_bytes(AUDIO_BYTES)
     apatch.write_text("PATCH-PROVENANCE-BYTES")
+    # Fake native display-plan helper: fake bytes, but a real Mach-O magic plus
+    # the executable bit, exactly what build_app's exe/Mach-O checks accept.
+    dplan = fixtures / "display-plan-helper"
+    dplan.write_bytes(DPLAN_BYTES)
+    dplan.chmod(0o755)
     audio_sha, patch_sha = hashlib.sha256(AUDIO_BYTES).hexdigest(), sha(apatch)
     orig_sha = hashlib.sha256(ORIGINAL_AUDIO_BYTES).hexdigest()
     pins = make_source(src.resolve(), home.resolve())
@@ -136,6 +161,11 @@ def main() -> int:
     assert m["game_pins"] == pins["game_pins"]
     assert m["payload_pins"] == pins["payload_pins"], "flat pin contract"
     assert "_runtime_root" not in m, "audit-only key leaked into manifest"
+    # -- default fixed build: existing metadata untouched -------------------
+    assert "presentation" not in m and "display_plan" not in m, \
+        "default fixed build must not gain candidate metadata"
+    assert "display_plan" not in m["layout"] and not (res / "display-plan").exists(), \
+        "default fixed build must not stage a display-plan helper"
     mtext = (res / "manifest.json").read_text()
     assert str(src) not in mtext and str(base) not in mtext, "manifest not portable"
     pt = res / "prefix-template"
@@ -174,6 +204,7 @@ def main() -> int:
     assert m["bundle"]["build_version"] == "2", "manifest build_version not build 2"
     pl = plistlib.load((out / "Contents/Info.plist").open("rb"))
     assert pl["CFBundleVersion"] == "2", "Info.plist CFBundleVersion not build 2"
+    assert pl["CFBundleIdentifier"] == B.BUNDLE_ID, "default Info.plist id changed"
     rep = json.loads(rp.read_text())
     ov = [a for a in rep["actions"] if a["action"] == "audio-module-overlay"]
     assert ov and ov[0]["replaced_sha256"] == orig_sha, "overlay did not replace the original module"
@@ -190,6 +221,38 @@ def main() -> int:
     assert not (out2 / "Contents/MacOS").exists() and (out2 / "Contents/Resources/manifest.json").is_file()
     assert (out2 / "Contents/Resources/wine/lib/wine/x86_64-unix/winecoreaudio.so"
             ).read_bytes() == AUDIO_BYTES, "prepare-layout must still overlay the audio module"
+
+    # -- adaptive safe-area candidate ---------------------------------------
+    dplan_before = (sha(dplan), oct(dplan.stat().st_mode & 0o777))
+    outa = base / "RA3-Adaptive.app"
+    nsa = args_for(src, outa, tools / "RA3Launcher", icon, tools / "display-mode",
+                   audio=amod, patch=apatch, bundle_id=B.ADAPTIVE_BUNDLE_ID,
+                   presentation="safe-area", display_plan=dplan)
+    rpa = B.build_app(nsa, home=home)
+    resa = outa / "Contents/Resources"
+    ma = json.loads((resa / "manifest.json").read_text())
+    pla = plistlib.load((outa / "Contents/Info.plist").open("rb"))
+    assert ma["presentation"] == "safe-area-v1", "adaptive manifest presentation missing"
+    assert ma["bundle"]["id"] == B.ADAPTIVE_BUNDLE_ID, "adaptive manifest bundle id wrong"
+    assert pla["CFBundleIdentifier"] == B.ADAPTIVE_BUNDLE_ID, "adaptive Info.plist id wrong"
+    assert B.BUNDLE_ID != B.ADAPTIVE_BUNDLE_ID and pl["CFBundleIdentifier"] != pla["CFBundleIdentifier"], \
+        "candidate must carry a unique bundle id (separate Application Support container)"
+    assert ma["layout"]["display_plan"] == "Resources/display-plan", "layout display_plan missing"
+    dp = resa / "display-plan"
+    assert dp.is_file() and dp.read_bytes() == DPLAN_BYTES, "display-plan helper not copied exactly"
+    assert os.access(dp, os.X_OK), "staged display-plan helper not executable"
+    assert ma["display_plan"] == {"resource": "Resources/display-plan",
+                                  "sha256": sha(dplan), "bytes": len(DPLAN_BYTES)}, \
+        "display-plan provenance wrong"
+    assert (sha(dplan), oct(dplan.stat().st_mode & 0o777)) == dplan_before, \
+        "display-plan SOURCE was mutated"
+    assert B.INFO_PLIST["CFBundleIdentifier"] == B.BUNDLE_ID, \
+        "module-level Info.plist template was globally mutated"
+    ma_text = (resa / "manifest.json").read_text()
+    assert str(base) not in ma_text and str(dplan) not in ma_text, "adaptive manifest not portable"
+    repa = json.loads(rpa.read_text())
+    assert repa["presentation"] == {"mode": "safe-area", "bundle_id": B.ADAPTIVE_BUNDLE_ID}, \
+        "report presentation record wrong"
 
     # -- refusals and aborts ------------------------------------------------
     def expect_abort(ns, home_=home, cleaned=True):
@@ -225,6 +288,41 @@ def main() -> int:
     bad.unlink()
     expect_abort(args_for(src, base / "X6.app", tools / "RA3Launcher", icon, tools / "display-mode",
                           audio=amod, patch=fixtures / "absent.patch"))
+
+    # -- candidate contract guards: must abort BEFORE any output exists ------
+    expect_abort(args_for(src, base / "A1.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch,
+                          presentation="safe-area"))  # safe-area without display-plan
+    expect_abort(args_for(src, base / "A2.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, presentation="safe-area",
+                          bundle_id=B.BUNDLE_ID, display_plan=dplan))  # default id reused for adaptive
+    expect_abort(args_for(src, base / "A3.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, presentation="safe-area",
+                          bundle_id="com.example.Other", display_plan=dplan))  # arbitrary id refused
+    expect_abort(args_for(src, base / "A4.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch,
+                          bundle_id=B.ADAPTIVE_BUNDLE_ID))  # adaptive id with fixed presentation
+    expect_abort(args_for(src, base / "A5.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, presentation="safe-area",
+                          bundle_id=B.ADAPTIVE_BUNDLE_ID,
+                          display_plan=fixtures / "absent-plan-helper"))  # helper missing
+    badplan = fixtures / "notmacho-plan-helper"
+    badplan.write_bytes(b"NOT-A-MACHO-IMAGE")
+    badplan.chmod(0o755)
+    expect_abort(args_for(src, base / "A6.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, presentation="safe-area",
+                          bundle_id=B.ADAPTIVE_BUNDLE_ID, display_plan=badplan))  # not Mach-O
+    badplan.unlink()
+    noexe = fixtures / "noexec-plan-helper"
+    noexe.write_bytes(DPLAN_BYTES)
+    noexe.chmod(0o644)
+    expect_abort(args_for(src, base / "A7.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, presentation="safe-area",
+                          bundle_id=B.ADAPTIVE_BUNDLE_ID, display_plan=noexe))  # not executable
+    noexe.unlink()
+    expect_abort(args_for(src, base / "A8.app", tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch,
+                          bundle_id="org.ra3mac../evil"))  # path characters in bundle id
     assert before == source_digest(), "SOURCE TREE WAS MUTATED during aborts"
 
     # -- CLI parses under -I ------------------------------------------------

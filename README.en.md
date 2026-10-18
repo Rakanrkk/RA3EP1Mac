@@ -1,4 +1,4 @@
-# RA3Mac
+# RA3EP1Mac — 起义时刻
 
 An unofficial compatibility project for running the Windows edition of *Command & Conquer: Red Alert 3 – Uprising* on Apple Silicon Macs. RA3Mac keeps the original game engine and connects its Direct3D 9 rendering path to Apple Metal through Rosetta 2, Wine/WoW64, and mtld3d. Its current mainline adds an adaptive fullscreen viewport for the primary display and macOS safe areas.
 
@@ -6,7 +6,7 @@ RA3Mac is not affiliated with or endorsed by Electronic Arts (EA), Apple, or the
 
 ## Release editions
 
-RA3Mac 1.1.0 has two different DMG editions:
+RA3EP1Mac 1.1.0 has two different DMG editions:
 
 | Edition | Contents | Intended for |
 | --- | --- | --- |
