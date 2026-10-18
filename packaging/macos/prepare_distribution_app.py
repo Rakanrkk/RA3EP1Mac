@@ -20,6 +20,28 @@ def digest(path):
     return value.hexdigest()
 
 
+def sanitize_registry(text):
+    """Remove hardware/session caches while retaining application settings."""
+    blocks = text.split("\n[")
+    kept, removed = [blocks[0]], 0
+    cache_keys = ("mmdevices", "winecoreaudio", "initial display mode", "/enum/display",
+                  "/enum/pci", "/enum/usb", "/enum/bth", "/control/video",
+                  "hardware/devicemap/video", "/control/deviceclasses", "volatile environment")
+    for block in blocks[1:]:
+        header = block.split("\n", 1)[0].lower().replace("\\\\", "/")
+        if any(key in header for key in cache_keys):
+            removed += 1
+            continue
+        if "/control/class/{4d36e968-" in header:
+            removed += 1
+            continue
+        import re
+        block = re.sub(r'(?m)^"(ComputerName|Hostname|NV Hostname)"="[^"\n]*"$',
+                       lambda match: '"' + match.group(1) + '"="RA3EP1MAC"', block)
+        kept.append(block)
+    return "\n[".join(kept), removed
+
+
 def prepare(source, output):
     source, output = Path(source).resolve(), Path(output).absolute()
     if output.suffix != ".app" or output.exists() or output.is_symlink():
@@ -54,19 +76,20 @@ def prepare(source, output):
                 if path.suffix.lower() in PRIVATE_SUFFIXES or (is_player and lower.startswith("stats_")):
                     removed.append(str(path.relative_to(output)))
                     path.unlink()
-        # Drop cached hardware endpoints from the template, including personal
-        # Bluetooth/continuity device labels. Wine enumerates them on first run.
+        backup = template / "system 2.reg"
+        if backup.exists():
+            removed.append(str(backup.relative_to(output)))
+            backup.unlink()
         for registry in template.glob("*.reg"):
-            text = registry.read_text(encoding="utf-8")
-            blocks = text.split("\n[")
-            kept = [blocks[0]]
-            for block in blocks[1:]:
-                header = block.split("\n", 1)[0]
-                if any(value in header for value in ("MMDevices", "winecoreaudio", "Initial Display Mode")):
-                    removed.append(str(registry.relative_to(output)) + ":cached-device-section")
-                else:
-                    kept.append(block)
-            registry.write_text("\n[".join(kept), encoding="utf-8")
+            cleaned, count = sanitize_registry(registry.read_text(encoding="utf-8"))
+            registry.write_text(cleaned, encoding="utf-8")
+            if count:
+                removed.append(str(registry.relative_to(output)) + f":{count}-cached-device-sections")
+        # Remove compiler source paths carried by local debug symbols. Code/data
+        # section equivalence and a fresh signature are checked before release.
+        for module in ("win32u.so", "winemac.so", "winecoreaudio.so"):
+            binary = output / "Contents/Resources/wine/lib/wine/x86_64-unix" / module
+            subprocess.run(["/usr/bin/strip", "-S", str(binary)], check=True, capture_output=True)
         game = template / "drive_c/ra3-mtld3d"
         for name in ("mtld3d-logs",):
             path = game / "Data" / name
