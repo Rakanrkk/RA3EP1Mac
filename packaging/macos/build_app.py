@@ -44,6 +44,20 @@ step owns linking and codesigning it. Only two launchable bundle ids exist
 before any output directory is created. --audio-module stays a per-build input
 passed through unchanged; no audio behavior differs between candidates.
 
+v1.2.0 two-rate options: --timing-60 and --timing-120 (both required together)
+stage the release PE payloads as Resources/timing/{Uprising60.exe,fps60.dll,
+fps120.dll}. The loader must hash-match the runtime root's pinned payload.
+Each timing dir must contain uprising120.dll plus build-result.json reporting
+the exact rate and the canonical release DLL SHA. The manifest then records
+version 1.2.0, data_version 1.0, build 3, exactly those three timing_pins,
+profiles 60/120 (log uprising120.log) and default_frame_rate 60. The Info.plist
+short version becomes 1.2.0 with CFBundleVersion 3 only on this path. A
+resource_updates entry for Data/StaticStream.big is emitted only when the
+staged template really contains the accepted light variant hash; otherwise no
+upgrade contract is claimed. --runtime-only removes the game directory from
+the destination prefix template and empties game_pins (runtime DMG import
+form; user data stays out of scope here).
+
 Usage: python3 -I packaging/macos/build_app.py --output /tmp/X.app --icon X.icns
 """
 import argparse, ctypes, ctypes.util, errno, fnmatch, hashlib, json, os, plistlib, re, shutil, stat, sys, time
@@ -61,6 +75,20 @@ PRESENTATION_SAFE_AREA = "safe-area-v1"  # manifest presentation value for adapt
 BUNDLE_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+")
 APP_BUILD = "2"  # matches the installed build-2 Info.plist (CFBundleVersion)
 AUDIO_PIN = "lib/wine/x86_64-unix/winecoreaudio.so"
+# v1.2.0 two-rate release contract (mirrors build_multirate_app.py).
+RELEASE_VERSION, DATA_VERSION = "1.2.0", "1.0"
+RELEASE_BUILD = "3"
+RATES = (60, 120)
+DEFAULT_RATE = 60
+TIMING_LOG = "uprising120.log"
+STATIC_REL = "Data/StaticStream.big"
+TIMING_LOADER = "Uprising60.exe"
+KNOWN_OLD_STATIC = "0daeb2d3aedfe7a83d75dc61732af8232de3ffb13603882aa5e216f0b9853834"
+KNOWN_NEW_STATIC = "785f42ad271e6da824c86a938ef79baf1ae99f7bba9aab12afba6c3a9f13a634"
+KNOWN_TIMING_SHA256 = {
+    60: "9017171020424cf6f040b8ea8802016ccaada70049b147fed25d48afe681c84b",
+    120: "1ede43dc679bcf2f91c19dd64c8695f8898aa75574c04e25921f4c93c9d0c7c3",
+}
 DEFAULT_AUDIO_MODULE = (BUILD / "compat-fixed-viewport" / "wine-build" /
                         "dlls" / "winecoreaudio.drv" / "winecoreaudio.so")
 DEFAULT_AUDIO_PATCH = Path(__file__).resolve().parent / "wine-no-audio-capture.patch"
@@ -222,6 +250,103 @@ def display_plan_provenance(src) -> dict:
     return {"resource": "Resources/display-plan",
             "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 
+def validate_pe32_payload(data: bytes, label: str) -> None:
+    if len(data) < 0x46 or data[:2] != b"MZ":
+        raise BuildError(f"{label} is not a 32-bit PE image")
+    pe_offset = int.from_bytes(data[0x3C:0x40], "little")
+    if pe_offset < 0x40 or pe_offset + 6 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise BuildError(f"{label} has an invalid PE header")
+    if int.from_bytes(data[pe_offset + 4:pe_offset + 6], "little") != 0x014C:
+        raise BuildError(f"{label} PE machine must be i386")
+
+
+def validate_timing_directory(directory: Path) -> dict:
+    """Validate the three portable PE files supplied on a Runtime volume."""
+    if not directory.is_dir():
+        raise BuildError("--timing-dir must name an existing flat timing directory")
+    files = {"Uprising60.exe": directory / "Uprising60.exe",
+             "fps60.dll": directory / "fps60.dll",
+             "fps120.dll": directory / "fps120.dll"}
+    for name, path in files.items():
+        if not path.is_file():
+            raise BuildError(f"--timing-dir is missing {name}")
+    result = {}
+    for rate in RATES:
+        name = f"fps{rate}.dll"
+        data = files[name].read_bytes()
+        validate_pe32_payload(data, f"--timing-dir/{name}")
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != KNOWN_TIMING_SHA256[rate]:
+            raise BuildError(f"--timing-dir/{name} SHA-256 is not the accepted release identity")
+        result[rate] = {"rate": rate, "path": str(files[name].resolve()), "sha256": actual,
+                        "bytes": len(data), "target_updates_hz": rate}
+    loader_data = files["Uprising60.exe"].read_bytes()
+    validate_pe32_payload(loader_data, "--timing-dir/Uprising60.exe")
+    return {"directory": str(directory.resolve()), "files": files, "timing": result,
+            "loader_sha256": hashlib.sha256(loader_data).hexdigest()}
+
+
+def validate_timing_input(rate: int, directory: Path) -> dict:
+    """Validate one exact-rate i386 payload before the app output is created."""
+    if not directory.is_dir():
+        raise BuildError(f"--timing-{rate} must name an existing artifact directory")
+    dll, result = directory / "uprising120.dll", directory / "build-result.json"
+    if not dll.is_file() or not result.is_file():
+        raise BuildError(f"--timing-{rate} requires uprising120.dll and build-result.json")
+    try:
+        report = json.loads(result.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"--timing-{rate} build report is invalid JSON") from error
+    if not isinstance(report, dict):
+        raise BuildError(f"--timing-{rate} build report must be a JSON object")
+    reported_rate = report.get("target_updates_hz")
+    if not isinstance(reported_rate, int) or isinstance(reported_rate, bool) or reported_rate != rate:
+        raise BuildError(f"--timing-{rate} build report target_updates_hz must equal {rate}")
+    data = dll.read_bytes()
+    if len(data) < 0x46 or data[:2] != b"MZ":
+        raise BuildError(f"--timing-{rate} payload is not a 32-bit PE image")
+    pe_offset = int.from_bytes(data[0x3C:0x40], "little")
+    if pe_offset < 0x40 or pe_offset + 6 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise BuildError(f"--timing-{rate} payload has an invalid PE header")
+    if int.from_bytes(data[pe_offset + 4:pe_offset + 6], "little") != 0x014C:
+        raise BuildError(f"--timing-{rate} payload PE machine must be i386")
+    actual = hashlib.sha256(data).hexdigest()
+    if report.get("dll_sha256") != actual:
+        raise BuildError(f"--timing-{rate} payload does not match its build report SHA-256")
+    if actual != KNOWN_TIMING_SHA256[rate]:
+        raise BuildError(f"--timing-{rate} payload SHA-256 is not the accepted release identity")
+    return {"rate": rate, "path": str(dll.resolve()), "sha256": actual, "bytes": len(data),
+            "target_updates_hz": rate}
+
+
+def stage_timing_bundle(resources: Path, prefix_template: Path, manifest: dict,
+                        timing: dict, log: list) -> None:
+    """Stage the pinned loader and two release DLLs as portable bundle resources."""
+    payload = prefix_template / "drive_c/u60-mtld3d"
+    loader_rel = "Uprising60.exe"
+    if loader_rel not in manifest["payload_pins"]:
+        raise BuildError("runtime candidate does not pin Uprising60.exe")
+    loader = payload / loader_rel
+    if not loader.is_file() or sha256(loader) != manifest["payload_pins"][loader_rel]:
+        raise BuildError("runtime Uprising60.exe does not match its payload pin")
+    target = resources / "timing"
+    target.mkdir()
+    shutil.copy2(loader, target / loader_rel)
+    pins = {loader_rel: sha256(target / loader_rel)}
+    for rate in RATES:
+        name = f"fps{rate}.dll"
+        shutil.copy2(Path(timing[rate]["path"]), target / name)
+        pins[name] = sha256(target / name)
+        log.append({"action": "stage-timing", "path": f"Resources/timing/{name}",
+                    "sha256": pins[name], "target_updates_hz": rate})
+    log.append({"action": "stage-timing", "path": f"Resources/timing/{loader_rel}",
+                "sha256": pins[loader_rel]})
+    manifest["timing_pins"] = pins
+    manifest["frame_rate_profiles"] = {
+        str(rate): {"dll": f"fps{rate}.dll", "log": TIMING_LOG} for rate in RATES}
+    manifest["default_frame_rate"] = DEFAULT_RATE
+
+
 def remediate_fonts(pt: Path, wine_src: Path, home: Path, log: list) -> dict:
     """Materialize registry-referenced fonts into C:\\windows\\Fonts; rewrite refs.
 
@@ -357,6 +482,8 @@ def audit(pt: Path, out: Path, manifest: dict, log: list) -> None:
     errs += pin_errors(manifest["game_pins"], pt / "drive_c/ra3-mtld3d")
     errs += pin_errors(manifest["payload_pins"], pt / "drive_c/u60-mtld3d")
     errs += pin_errors(manifest["font_pins"], pt / "drive_c/windows/Fonts")
+    if manifest.get("timing_pins"):
+        errs += pin_errors(manifest["timing_pins"], res / "timing")
     wine = res / "wine"
     for dp, dns, fns in os.walk(wine, followlinks=False):
         for n in dns + fns:
@@ -409,7 +536,7 @@ do not redistribute this bundle. Pins are pre-codesign identity; refreshed by th
 sign step before outer codesign.
 """
 
-def build_app(args, home: Path = None) -> Path:
+def build_app(args, home: Path = None, *, known_static: tuple = None) -> Path:
     out, rt = Path(args.output).resolve(), Path(args.runtime_root).resolve()
     home = Path(home or Path.home()).resolve()
     amod = Path(args.audio_module).resolve()
@@ -454,7 +581,24 @@ def build_app(args, home: Path = None) -> Path:
     if not args.prepare_layout and not launcher.is_file():
         raise BuildError(f"launcher binary missing: {launcher} (use --prepare-layout to stage without it)")
     cm = json.loads(man.read_text())
+    timing_inputs = {}
+    known_static = known_static or (KNOWN_OLD_STATIC, KNOWN_NEW_STATIC)
+    timing_60 = getattr(args, "timing_60", None)
+    timing_120 = getattr(args, "timing_120", None)
+    timing_dir = getattr(args, "timing_dir", None)
+    if timing_dir and (timing_60 or timing_120):
+        raise BuildError("--timing-dir cannot be combined with --timing-60/--timing-120")
+    if bool(timing_60) != bool(timing_120):
+        raise BuildError("--timing-60 and --timing-120 must be supplied together")
+    flat_timing = validate_timing_directory(Path(timing_dir).expanduser().resolve()) if timing_dir else None
+    if flat_timing:
+        timing_inputs = flat_timing["timing"]
+    elif timing_60:
+        timing_inputs = {rate: validate_timing_input(rate, Path(path).expanduser().resolve())
+                         for rate, path in ((60, timing_60), (120, timing_120))}
     pins = {k: cm[k] for k in ("runtime_pins", "game_pins", "payload_pins")}
+    if flat_timing and flat_timing["loader_sha256"] != pins["payload_pins"].get(TIMING_LOADER):
+        raise BuildError("--timing-dir/Uprising60.exe does not match the runtime source loader pin")
     # The runtime root keeps the ORIGINAL audio module; the built module is
     # authoritative for the destination pin, so any stale candidate audio pin
     # is excluded from the source-side validation and replaced below.
@@ -466,6 +610,10 @@ def build_app(args, home: Path = None) -> Path:
         report["pins"][f"{group}-before"] = "ok" if not e else e
         if e:
             raise BuildError(f"source pin validation failed: {e}")
+    if timing_inputs and not getattr(args, "runtime_only", False):
+        source_static = src_pins["game_pins"].get(STATIC_REL)
+        if source_static not in known_static:
+            raise BuildError(f"timing-enabled build requires a recognized StaticStream identity, got {source_static}")
     res = out / "Contents/Resources"
     res.mkdir(parents=True)
     try:
@@ -474,15 +622,25 @@ def build_app(args, home: Path = None) -> Path:
         overlay_audio_module(res, amod, prov, report["actions"])
         pt = res / "prefix-template"
         report["source_stats"] = {"wine": tree_stats(wine_src), "prefix": tree_stats(prefix_src)}
+        runtime_only = bool(getattr(args, "runtime_only", False))
+        if runtime_only:
+            game_dir = pt / "drive_c/ra3-mtld3d"
+            if game_dir.exists():
+                shutil.rmtree(game_dir)
+                report["actions"].append({"action": "omit-game-data", "path": "prefix-template/drive_c/ra3-mtld3d"})
+            pins["game_pins"] = {}
         font_pins = remediate_prefix(pt, wine_src, home, report["actions"])
         report["fonts"] = font_pins
         layout = {"wine": "Resources/wine", "prefix_template": "Resources/prefix-template",
                   "display_helper": "Resources/display-mode"}
         if dprov is not None:
             layout["display_plan"] = "Resources/display-plan"
-        mres = {"schema": SCHEMA, "version": "1.0",
+        if runtime_only:
+            pins["game_pins"] = {}
+        mres = {"schema": SCHEMA, "version": RELEASE_VERSION if timing_inputs else "1.0",
                 "bundle": {"id": bundle_id, "name": APP_NAME, "executable": "RA3Launcher",
-                           "short_version": "1.0", "build_version": APP_BUILD},
+                           "short_version": RELEASE_VERSION if timing_inputs else "1.0",
+                           "build_version": RELEASE_BUILD if timing_inputs else APP_BUILD},
                 "layout": layout,
                 "pin_roots": {"runtime": "Resources/wine",
                               "game": "Resources/prefix-template/drive_c/ra3-mtld3d",
@@ -499,6 +657,16 @@ def build_app(args, home: Path = None) -> Path:
                 "audio_capture": AUDIO_CAPTURE_FIELD,
                 "privacy_usage_requests": PRIVACY_FIELD,
                 "audio": prov}
+        if timing_inputs:
+            mres["data_version"] = DATA_VERSION
+            stage_timing_bundle(res, pt, mres, timing_inputs, report["actions"])
+            accepted_static = mres["game_pins"].get(STATIC_REL)
+            actual_static = pt / "drive_c/ra3-mtld3d" / STATIC_REL
+            if accepted_static == known_static[1] and actual_static.is_file() and sha256(actual_static) == known_static[1]:
+                mres["resource_updates"] = {STATIC_REL: {
+                    "previous_sha256": [known_static[0]], "sha256": known_static[1]}}
+            else:
+                mres.pop("resource_updates", None)
         if presentation == "safe-area":
             mres["presentation"] = PRESENTATION_SAFE_AREA
             mres["display_plan"] = dprov
@@ -506,7 +674,11 @@ def build_app(args, home: Path = None) -> Path:
         audit(pt, out, mres, report["actions"])
         del mres["_runtime_root"]
         (res / "manifest.json").write_text(json.dumps(mres, ensure_ascii=False, indent=1) + "\n")
-        plistlib.dump(info_plist(bundle_id), (out / "Contents/Info.plist").open("wb"))
+        plist = info_plist(bundle_id)
+        if timing_inputs:
+            plist["CFBundleVersion"] = RELEASE_BUILD
+            plist["CFBundleShortVersionString"] = RELEASE_VERSION
+        plistlib.dump(plist, (out / "Contents/Info.plist").open("wb"))
         (res / "Delivery.txt").write_text(DELIVERY, encoding="utf-8")
         shutil.copy2(helper, res / "display-mode")
         os.chmod(res / "display-mode", 0o755)
@@ -524,7 +696,10 @@ def build_app(args, home: Path = None) -> Path:
             os.chmod(out / "Contents/MacOS/RA3Launcher", 0o755)
         elif not args.prepare_layout:
             raise BuildError(f"launcher binary vanished: {launcher}")
-        report["dest_stats"] = {"prefix_template": tree_stats(pt)}
+        if timing_inputs:
+            report["timing"] = {str(rate): {key: timing_inputs[rate][key]
+                                             for key in ("rate", "sha256", "bytes", "target_updates_hz")}
+                                for rate in RATES}
         report["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         report["mode"] = "prepare-layout (no launcher; not launchable)" if args.prepare_layout else "full"
         REPORTS.mkdir(parents=True, exist_ok=True)
@@ -561,6 +736,12 @@ def main(argv=None) -> int:
     ap.add_argument("--display-plan", default=None,
                     help="native display-plan helper binary (required with --presentation "
                          "safe-area; copied to Resources/display-plan, linked by the sign step)")
+    ap.add_argument("--timing-60", type=Path, help="60 FPS release artifact directory")
+    ap.add_argument("--timing-120", type=Path, help="120 FPS release artifact directory")
+    ap.add_argument("--timing-dir", type=Path,
+                    help="flat Runtime timing folder containing Uprising60.exe, fps60.dll, fps120.dll")
+    ap.add_argument("--runtime-only", action="store_true",
+                    help="omit drive_c/ra3-mtld3d from this cloned prefix template and clear game pins")
     args = ap.parse_args(argv)
     try:
         rp = build_app(args)

@@ -9,6 +9,13 @@ Example:
 The input is read from GAME_DIR/Data and never modified. OUTPUT_DIR must not
 exist. Existing accepted archives are copied; known originals are transformed
 and verified against their accepted output digests before publication.
+
+Pass --high-refresh-light to target the pinned high-refresh light
+StaticStream variant instead: the accepted SovietPowerGlow archive gains one
+appended decoded asset bank whose only delta is the
+JapanPowerPlantIdleLight burst interval pair (1.0 -> 0.0), so 60 FPS and
+120 FPS releases can ship the identical resource generated offline from the
+user's own game. The default contract is unchanged without the option.
 """
 
 from dataclasses import dataclass
@@ -33,6 +40,18 @@ GLOW_ASSET_SIZE = 552
 MAX_REFPACK_SIZE = 500_000_000
 COPY_BUFFER_SIZE = 8 * 1024 * 1024
 
+# High-refresh light variant: same particle-template type code, distinct
+# template name and name hash, 552-byte asset, burst interval floats at
+# 0x60/0x64. Pins identity with the accepted SovietPowerGlow archive so the
+# appended decoded bank reproduces the accepted light archive exactly.
+LIGHT_ASSET = b'FXParticleSystemTemplate:JapanPowerPlantIdleLight'
+LIGHT_TYPE = 0x28e7fd7f
+LIGHT_NAME_HASH = 0x56c6a9ad
+LIGHT_ASSET_SIZE = 552
+LIGHT_TARGET_SHA = '785f42ad271e6da824c86a938ef79baf1ae99f7bba9aab12afba6c3a9f13a634'
+ACCEPTED_PACKED_BANK_SHA = '01869e77938d9eaf30bdc028007119347d232c52c20756a3336c37fc588a147d'
+ACCEPTED_DECODED_BANK_SHA = 'd02cf27a23014f99beaa1da25145c853ddf70a3c70b16ce1a1dedd4c85e88288'
+
 
 @dataclass(frozen=True)
 class ArchiveContract:
@@ -41,17 +60,27 @@ class ArchiveContract:
     patched_sha256: str
 
 
-CONTRACTS = (
-    ArchiveContract('Shaders.big',
-                    '165432f89a78a84000c1389cd8d8c2c47ce9cc72fdb15c2c8c845d8c74388df4',
-                    '76c371082a2df0ff69a919e0a196d7869f8a206736b8f484fa9155abbee2f651'),
-    ArchiveContract('Misc.big',
-                    '6fa2e6fd42b0550aefd594a08cce3250a4790824d8daf6bc8177a62c798d8ea9',
-                    'b353c53388f8798a903498248472277b1947b9141d44230e622152f085cf89a2'),
-    ArchiveContract('StaticStream.big',
-                    '6e1b47a22db7f66ad5d1a2c01f82139599a30975bc78502ef44403670643dc03',
-                    '0daeb2d3aedfe7a83d75dc61732af8232de3ffb13603882aa5e216f0b9853834'),
-)
+SHADERS_CONTRACT = ArchiveContract(
+    'Shaders.big',
+    '165432f89a78a84000c1389cd8d8c2c47ce9cc72fdb15c2c8c845d8c74388df4',
+    '76c371082a2df0ff69a919e0a196d7869f8a206736b8f484fa9155abbee2f651')
+MISC_CONTRACT = ArchiveContract(
+    'Misc.big',
+    '6fa2e6fd42b0550aefd594a08cce3250a4790824d8daf6bc8177a62c798d8ea9',
+    'b353c53388f8798a903498248472277b1947b9141d44230e622152f085cf89a2')
+STATIC_CONTRACT = ArchiveContract(
+    'StaticStream.big',
+    '6e1b47a22db7f66ad5d1a2c01f82139599a30975bc78502ef44403670643dc03',
+    '0daeb2d3aedfe7a83d75dc61732af8232de3ffb13603882aa5e216f0b9853834')
+
+CONTRACTS = (SHADERS_CONTRACT, MISC_CONTRACT, STATIC_CONTRACT)
+
+# --high-refresh-light swaps only the StaticStream target pin; the default
+# CONTRACTS tuple above remains the accepted SovietPowerGlow publication.
+LIGHT_CONTRACTS = (
+    SHADERS_CONTRACT, MISC_CONTRACT,
+    ArchiveContract(STATIC_CONTRACT.name, STATIC_CONTRACT.original_sha256,
+                    LIGHT_TARGET_SHA))
 
 
 class ResourceError(RuntimeError):
@@ -429,7 +458,8 @@ def _patch_bloom_archive(raw, expected_script_hash):
     return candidate
 
 
-def _parse_static_manifest(manifest):
+def _find_static_asset(manifest, asset_name, type_code, name_hash, asset_size, label):
+    """Locate one pinned asset row in a decoded static.manifest."""
     if len(manifest) < 52:
         raise ResourceError('static manifest header is truncated')
     count = struct.unpack_from('<I', manifest, 16)[0]
@@ -437,7 +467,7 @@ def _parse_static_manifest(manifest):
     name_base = 52 + 48 * count + refs + streams
     if name_base + names_size + sources_size != len(manifest):
         raise ResourceError('static manifest section sizes do not match')
-    needle = GLOW_ASSET + b'\0'
+    needle = asset_name + b'\0'
     name_hits = []
     start = name_base
     stop = name_base + names_size
@@ -448,7 +478,7 @@ def _parse_static_manifest(manifest):
         name_hits.append(found - name_base)
         start = found + 1
     if len(name_hits) != 1:
-        raise ResourceError('expected one SovietPowerGlow manifest name')
+        raise ResourceError('expected one %s manifest name' % label)
     name_offset = name_hits[0]
     binary_offset = 8
     asset_hits = []
@@ -459,12 +489,17 @@ def _parse_static_manifest(manifest):
             asset_hits.append((index, fields, binary_offset))
         binary_offset += fields[8]
     if len(asset_hits) != 1:
-        raise ResourceError('expected one SovietPowerGlow manifest asset')
+        raise ResourceError('expected one %s manifest asset' % label)
     index, fields, asset_offset = asset_hits[0]
-    if fields[0] != GLOW_TYPE or fields[1] != GLOW_NAME_HASH or fields[8] != GLOW_ASSET_SIZE:
-        raise ResourceError('SovietPowerGlow type, name hash or size differs from the pin')
+    if fields[0] != type_code or fields[1] != name_hash or fields[8] != asset_size:
+        raise ResourceError('%s type, name hash or size differs from the pin' % label)
     return {'asset_index': index, 'asset_offset': asset_offset,
             'asset_size': fields[8], 'decoded_size': binary_offset}
+
+
+def _parse_static_manifest(manifest):
+    return _find_static_asset(manifest, GLOW_ASSET, GLOW_TYPE, GLOW_NAME_HASH,
+                              GLOW_ASSET_SIZE, 'SovietPowerGlow')
 
 
 def patch_static_archive(source_path, output_path, temporary_directory):
@@ -586,6 +621,148 @@ def _write_single_member_big(payload_path, destination, member_name):
             shutil.copyfileobj(payload, output, COPY_BUFFER_SIZE)
 
 
+def _member_sha256(archive_path, entry):
+    """Stream-hash one BIG member range without loading it into memory."""
+    _, offset, size, _ = entry
+    digest = hashlib.sha256()
+    with Path(archive_path).open('rb') as stream:
+        stream.seek(offset)
+        remaining = size
+        while remaining:
+            block = _read_exact(stream, min(remaining, COPY_BUFFER_SIZE), 'BIG member')
+            digest.update(block)
+            remaining -= len(block)
+    return digest.hexdigest()
+
+
+def _verify_single_range_delta(original_path, modified_path, start, length):
+    """Confirm two same-size files differ only inside [start, start + length)."""
+    stop = start + length
+    with Path(original_path).open('rb') as left, Path(modified_path).open('rb') as right:
+        offset = 0
+        while True:
+            before = left.read(COPY_BUFFER_SIZE)
+            if not before:
+                if right.read(1):
+                    raise ResourceError('modified bank is longer than the original')
+                break
+            after = right.read(len(before))
+            if len(after) != len(before):
+                raise ResourceError('modified bank is shorter than the original')
+            expected = bytearray(before)
+            low, high = max(start, offset), min(stop, offset + len(before))
+            if high > low:
+                expected[low - offset:high - offset] = after[low - offset:high - offset]
+            if bytes(expected) != after:
+                raise ResourceError('decoded bank changed outside the selected fields')
+            offset += len(before)
+
+
+def patch_static_light_archive(source_path, output_path, temporary_directory,
+                               packed_bank_sha=ACCEPTED_PACKED_BANK_SHA,
+                               decoded_bank_sha=ACCEPTED_DECODED_BANK_SHA):
+    """Produce the high-refresh light StaticStream from an accepted input.
+
+    The packed data/static.bin RefPack member must first hash to the accepted
+    prior identity; the member is then decoded, only the JapanPowerPlantIdleLight
+    burst interval floats at asset offsets 0x60/0x64 change from 1.0 to 0.0, and
+    the full decoded bank is appended as a plain member with its BIG index row
+    repointed. Every other member keeps its packed bytes untouched. No game
+    bytes live in this module; everything is derived from the caller's input.
+    """
+    source_path, output_path = Path(source_path), Path(output_path)
+    temporary_directory = Path(temporary_directory)
+    entries = big_catalog_file(source_path)
+    by_name = {entry[0]: entry for entry in entries}
+    if STATIC_MANIFEST not in by_name or STATIC_BINARY not in by_name:
+        raise ResourceError('StaticStream archive lacks required manifest or binary members')
+
+    actual_packed = _member_sha256(source_path, by_name[STATIC_BINARY])
+    if actual_packed != packed_bank_sha:
+        raise ResourceError(
+            'static.bin packed bank does not match the accepted prior identity: %s'
+            % actual_packed)
+
+    manifest_entry = by_name[STATIC_MANIFEST]
+    with source_path.open('rb') as source:
+        source.seek(manifest_entry[1])
+        manifest = refpack_unpack(_read_exact(source, manifest_entry[2], STATIC_MANIFEST))
+    record = _find_static_asset(manifest, LIGHT_ASSET, LIGHT_TYPE, LIGHT_NAME_HASH,
+                                LIGHT_ASSET_SIZE, 'JapanPowerPlantIdleLight')
+
+    stream_entry = by_name[STATIC_BINARY]
+    decoded_bank = temporary_directory / 'static-stream.light-decoded.dec'
+    decoded = decode_refpack_range(
+        source_path, stream_entry[1], stream_entry[2], decoded_bank)
+    if decoded['decoded_size'] != record['decoded_size']:
+        raise ResourceError('static manifest binary length disagrees with decoded stream')
+    if sha256_file(decoded_bank) != decoded_bank_sha:
+        raise ResourceError('decoded asset bank does not match the accepted prior identity')
+
+    with decoded_bank.open('rb') as bank:
+        bank.seek(record['asset_offset'])
+        asset = _read_exact(bank, record['asset_size'], 'JapanPowerPlantIdleLight asset')
+    if struct.unpack_from('<2f', asset, 0x3c) != (1.0, 1.0):
+        raise ResourceError('JapanPowerPlantIdleLight lifetime differs from expected 1/1')
+    if struct.unpack_from('<2f', asset, 0x48) != (70.0, 70.0):
+        raise ResourceError('JapanPowerPlantIdleLight size differs from expected 70/70')
+    if struct.unpack_from('<2f', asset, 0x60) != (1.0, 1.0):
+        raise ResourceError('JapanPowerPlantIdleLight burst interval differs from expected 1/1')
+    if struct.unpack_from('<2f', asset, 0x6c) != (1.0, 1.0):
+        raise ResourceError('JapanPowerPlantIdleLight burst count differs from expected 1/1')
+
+    patched_bank = temporary_directory / 'static-stream.light-patched.dec'
+    shutil.copyfile(decoded_bank, patched_bank)
+    with patched_bank.open('r+b') as patched:
+        patched.seek(record['asset_offset'] + 0x60)
+        patched.write(struct.pack('<2f', 0.0, 0.0))
+        patched.flush()
+        os.fsync(patched.fileno())
+    with patched_bank.open('rb') as patched:
+        patched.seek(record['asset_offset'] + 0x60)
+        if patched.read(8) != struct.pack('<2f', 0.0, 0.0):
+            raise ResourceError('burst interval fields were not written exactly')
+    _verify_single_range_delta(decoded_bank, patched_bank,
+                               record['asset_offset'] + 0x60, 8)
+
+    replace_big_entry_file(source_path, STATIC_BINARY, patched_bank, output_path)
+    patched_entries = big_catalog_file(output_path)
+    if [entry[0] for entry in patched_entries] != [entry[0] for entry in entries]:
+        raise ResourceError('StaticStream BIG member inventory changed')
+    output_ranges = {entry[0]: (entry[1], entry[2]) for entry in patched_entries}
+    for name, offset, size, _ in entries:
+        if name == STATIC_BINARY:
+            continue
+        other_offset, other_size = output_ranges[name]
+        if (size != other_size or
+                not _file_ranges_equal(source_path, offset, output_path, other_offset, size)):
+            raise ResourceError('unrelated StaticStream member changed: %s' % name)
+    new_offset, new_size = output_ranges[STATIC_BINARY]
+    if new_size != decoded['decoded_size'] or new_offset != source_path.stat().st_size:
+        raise ResourceError('appended decoded bank was not repointed as expected')
+    if not _file_ranges_equal(output_path, new_offset, patched_bank, 0, new_size):
+        raise ResourceError('appended decoded bank does not read back exactly')
+    return {'asset': LIGHT_ASSET.decode('ascii'), 'asset_index': record['asset_index'],
+            'asset_offset': record['asset_offset'],
+            'changed_asset_offsets': ['0x60', '0x64'],
+            'change': 'burst interval 1.0 -> 0.0; every other decoded bank byte preserved',
+            'decoded_stream_size': decoded['decoded_size'],
+            'source_packed_bank_sha256': actual_packed,
+            'verified_other_entries': len(entries) - 1}
+
+
+def _light_static_state(actual):
+    """Classify a StaticStream input for the high-refresh light variant."""
+    if actual == STATIC_CONTRACT.original_sha256:
+        return 'original'
+    if actual == STATIC_CONTRACT.patched_sha256:
+        return 'accepted_soviet_glow'
+    if actual == LIGHT_TARGET_SHA:
+        return 'already_high_refresh_light'
+    raise ResourceError(
+        'unknown StaticStream.big input hash %s for the high-refresh-light variant' % actual)
+
+
 def _file_ranges_equal(left_path, left_offset, right_path, right_offset, size):
     with Path(left_path).open('rb') as left, Path(right_path).open('rb') as right:
         left.seek(left_offset)
@@ -612,11 +789,21 @@ def _copy_verified(source, destination, expected_hash):
     return actual
 
 
-def generate_resources(game_dir, output_dir, contracts=CONTRACTS):
-    """Build exactly three verified archive copies inside a previously absent directory."""
+def generate_resources(game_dir, output_dir, contracts=CONTRACTS,
+                       high_refresh_light=False):
+    """Build exactly three verified archive copies inside a previously absent directory.
+
+    With high_refresh_light the StaticStream target becomes the pinned
+    high-refresh light archive; known-original inputs are first converted to
+    the accepted SovietPowerGlow archive and then light-patched, accepted
+    inputs are light-patched directly, and already-light inputs are copied
+    through. The default contract is untouched without the option.
+    """
     game_dir, output_dir = Path(game_dir).expanduser(), Path(output_dir).expanduser()
     if os.path.lexists(output_dir):
         raise ResourceError('output directory already exists; refusing to overwrite')
+    if high_refresh_light:
+        contracts = LIGHT_CONTRACTS
     contract_map = {contract.name: contract for contract in contracts}
     expected_names = {contract.name for contract in CONTRACTS}
     if set(contract_map) != expected_names:
@@ -630,7 +817,9 @@ def generate_resources(game_dir, output_dir, contracts=CONTRACTS):
             raise ResourceError('required source archive is missing: Data/%s' % name)
         actual = sha256_file(source)
         contract = contract_map[name]
-        if actual == contract.original_sha256:
+        if high_refresh_light and name == 'StaticStream.big':
+            state = _light_static_state(actual)
+        elif actual == contract.original_sha256:
             state = 'original'
         elif actual == contract.patched_sha256:
             state = 'already_patched'
@@ -656,6 +845,9 @@ def generate_resources(game_dir, output_dir, contracts=CONTRACTS):
             if states[name] == 'already_patched':
                 actual = _copy_verified(source, candidate, contract.patched_sha256)
                 operation = 'copied_accepted_input'
+            elif states[name] == 'already_high_refresh_light':
+                actual = _copy_verified(source, candidate, contract.patched_sha256)
+                operation = 'copied_high_refresh_light_input'
             elif name in ('Shaders.big', 'Misc.big'):
                 raw = source.read_bytes()
                 patched = _patch_bloom_archive(raw, 'e8deec02f430f683c73d87554616e60aaf31866de08a33b2bcbeeeb792b207ce')
@@ -665,16 +857,31 @@ def generate_resources(game_dir, output_dir, contracts=CONTRACTS):
                     os.fsync(output.fileno())
                 actual = sha256_file(candidate)
                 operation = 'patched_bloom_texture_formats'
-            else:
-                details = patch_static_archive(source, candidate, staging_work)
+            elif states[name] == 'accepted_soviet_glow':
+                details = patch_static_light_archive(source, candidate, staging_work)
                 actual = sha256_file(candidate)
-                operation = 'patched_soviet_power_glow'
+                operation = 'patched_japan_power_plant_idle_light'
+            else:
+                intermediate = staging_work / 'StaticStream.soviet-glow-stage.big'
+                patch_static_archive(source, intermediate, staging_work)
+                intermediate_sha = sha256_file(intermediate)
+                if intermediate_sha != STATIC_CONTRACT.patched_sha256:
+                    raise ResourceError(
+                        'SovietPowerGlow stage hash mismatch: expected %s, got %s' % (
+                            STATIC_CONTRACT.patched_sha256, intermediate_sha))
+                details = patch_static_light_archive(intermediate, candidate, staging_work)
+                details['intermediate_sha256'] = intermediate_sha
+                actual = sha256_file(candidate)
+                operation = 'patched_soviet_power_glow_then_japan_idle_light'
             if actual != contract.patched_sha256:
                 raise ResourceError('%s output hash mismatch: expected %s, got %s' % (
                     name, contract.patched_sha256, actual))
-            reports.append({'archive': name, 'input_sha256': input_hashes[name],
-                            'input_state': states[name], 'output_sha256': actual,
-                            'operation': operation, **details})
+            report = {'archive': name, 'input_sha256': input_hashes[name],
+                      'input_state': states[name], 'output_sha256': actual,
+                      'operation': operation, **details}
+            if high_refresh_light:
+                report['output_pin_sha256'] = contract.patched_sha256
+            reports.append(report)
         shutil.rmtree(staging_work)
         # Claim the absent destination explicitly, then move only our three staged files.
         output_dir.mkdir(exist_ok=False)
@@ -699,8 +906,13 @@ def generate_resources(game_dir, output_dir, contracts=CONTRACTS):
             except OSError:
                 pass
         raise
-    return {'status': 'PASS', 'output_dir': str(output_dir), 'archives': reports,
-            'game_directory_modified': False}
+    result = {'status': 'PASS', 'output_dir': str(output_dir), 'archives': reports,
+              'game_directory_modified': False}
+    if high_refresh_light:
+        result['static_stream_variant'] = 'high-refresh-light'
+        result['target_pins'] = {name: contract_map[name].patched_sha256
+                                 for name in ('Shaders.big', 'Misc.big', 'StaticStream.big')}
+    return result
 
 
 def main(argv=None):
@@ -709,8 +921,14 @@ def main(argv=None):
                         help='game root containing Data/Shaders.big, Misc.big and StaticStream.big')
     parser.add_argument('--output-dir', required=True,
                         help='new directory for the three patched archive copies; must not exist')
+    parser.add_argument('--high-refresh-light', action='store_true',
+                        help='produce the pinned high-refresh light StaticStream variant '
+                             '(JapanPowerPlantIdleLight burst intervals 1.0 -> 0.0) so 60 and '
+                             '120 FPS releases ship the identical resource; the default '
+                             'contract stays the accepted SovietPowerGlow publication')
     args = parser.parse_args(argv)
-    result = generate_resources(args.game_dir, args.output_dir)
+    result = generate_resources(args.game_dir, args.output_dir,
+                                high_refresh_light=args.high_refresh_light)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

@@ -19,3 +19,11 @@ jobs:
           python3 -I -B packaging/macos/test_release_build.py
       - name: Synthetic resource compatibility checks
         run: python3 -I -B packaging/resources/test_compat_resources.py
+      - name: Privacy and two-rate packaging fixtures
+        run: |
+          python3 -I -B packaging/macos/test_distribution_privacy.py
+          python3 -I -B packaging/macos/test_multirate_app.py
+          python3 -I -B packaging/macos/test_verify_release.py
+          python3 -I -B packaging/macos/test_distribution_v12.py
+      - name: Two-rate launcher fixtures
+        run: python3 -I -B packaging/macos/test_frame_rate_launcher.py build/compat-adaptive-viewport/RA3Launcher-checks

@@ -10,12 +10,24 @@ MACH_MAGICS = {b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
                b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
 
 
+def signature_policy(identity, public=False):
+    if public:
+        if identity != '-':
+            raise ValueError('public wording is limited to ad-hoc signatures')
+        return 'Ad-hoc integrity signature; component pins refreshed after signing'
+    return 'Local signing identity ' + identity + '; pins refreshed after signing'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('app', type=Path)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--identity', default='-', help='Existing signing identity hash, or - for ad-hoc')
+    parser.add_argument('--public', action='store_true',
+                        help='Use neutral public manifest wording; requires ad-hoc signing')
     args = parser.parse_args()
+    if args.public and args.identity != '-':
+        parser.error('--public requires --identity - so no local certificate identity is embedded')
     app = args.app.absolute()
     if not app.is_dir() or app.suffix != '.app':
         raise RuntimeError('Expected an existing app bundle')
@@ -58,7 +70,7 @@ def main():
         helper = app / 'Contents/Resources/display-plan'
         manifest['display_plan']['sha256'] = hashlib.sha256(helper.read_bytes()).hexdigest()
         manifest['display_plan']['bytes'] = helper.stat().st_size
-    manifest['signature_policy'] = 'Local signing identity ' + args.identity + '; pins refreshed after signing'
+    manifest['signature_policy'] = signature_policy(args.identity, args.public)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', args.identity, '--timestamp=none', str(app)],
                    check=True, capture_output=True, text=True)

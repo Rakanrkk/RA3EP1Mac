@@ -10,6 +10,48 @@ import shutil
 import subprocess
 
 PRIVATE_SUFFIXES = {".ra3save", ".ra3ureplay", ".log", ".dmp", ".mdmp"}
+PLAYER_ARCHIVE_DIRS = {"saved games", "replays"}
+GAME_PLAYER_DIRS = {"red alert 3 uprising", "紅色警戒3 - 起義時刻"}
+
+
+def is_private_player_file(path, users_root):
+    """Identify logs and every file below a player's Saved Games/Replays folder."""
+    path, users_root = Path(path), Path(users_root)
+    try:
+        relative = path.relative_to(users_root)
+    except ValueError:
+        return False
+    parts = relative.parts
+    is_game_profile = any(part.lower() in GAME_PLAYER_DIRS for part in parts)
+    is_saved_content = any(part.lower() in PLAYER_ARCHIVE_DIRS for part in parts)
+    return path.suffix.lower() in PRIVATE_SUFFIXES or (is_game_profile and is_saved_content)
+
+
+def remove_player_archive_directories(users_root, output_root, removed):
+    """Remove game save/replay directories from the cloned sharing copy only."""
+    users_root, output_root = Path(users_root), Path(output_root)
+    candidates = []
+    if not users_root.is_dir() or users_root.is_symlink():
+        return
+    for current, dirs, _files in os.walk(users_root, followlinks=False):
+        parent = Path(current)
+        for name in list(dirs):
+            path = parent / name
+            if path.is_symlink():
+                dirs.remove(name)
+                continue
+            parts = path.relative_to(users_root).parts
+            in_game_tree = any(part.lower() in GAME_PLAYER_DIRS for part in parts)
+            if in_game_tree and name.lower() in PLAYER_ARCHIVE_DIRS:
+                candidates.append(path)
+                dirs.remove(name)
+    for path in sorted(candidates, key=lambda item: len(item.parts), reverse=True):
+        relative = str(path.relative_to(output_root))
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+        removed.append(relative)
 
 
 def digest(path):
@@ -73,7 +115,7 @@ def prepare(source, output):
                 lower = name.lower()
                 is_player = users in path.parents and any(part in path.parts for part in
                     ("Red Alert 3 Uprising", "紅色警戒3 - 起義時刻"))
-                if path.suffix.lower() in PRIVATE_SUFFIXES or (is_player and lower.startswith("stats_")):
+                if is_private_player_file(path, users) or (is_player and lower.startswith("stats_")):
                     removed.append(str(path.relative_to(output)))
                     path.unlink()
         backup = template / "system 2.reg"
@@ -96,8 +138,10 @@ def prepare(source, output):
             if path.exists():
                 removed.append(str(path.relative_to(output)))
                 shutil.rmtree(path)
-        # Ship neutral initial skirmish/movie state; keep only the deterministic
-        # profile index, graphics defaults and keyboard mapping.
+        # Remove whole player save/replay directories: shipped campaign and
+        # autosave files use EA-specific extensions, not only .ra3save.
+        remove_player_archive_directories(users, output, removed)
+        # Ship neutral initial skirmish/movie state; keep profile controls intact.
         for path in users.rglob("*"):
             if path.is_file() and not path.is_symlink() and path.name in ("Skirmish.ini", "movies.ini"):
                 removed.append(str(path.relative_to(output)))

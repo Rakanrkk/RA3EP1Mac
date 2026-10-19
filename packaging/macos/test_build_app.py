@@ -27,6 +27,22 @@ AUDIO_BYTES = b"\xcf\xfa\xed\xfe" + b"RA3_NO_AUDIO_CAPTURE-DISABLED-CAPTURE-BIN"
 ORIGINAL_AUDIO_BYTES = b"ORIGINAL-WINECOREAUDIO"
 DPLAN_BYTES = b"\xcf\xfa\xed\xfe" + b"RA3-NATIVE-DISPLAY-PLAN-HELPER-FAKE"
 
+
+def pe32_fixture(payload: bytes) -> bytes:
+    return (b"MZ" + b"\0" * 0x3A + (0x40).to_bytes(4, "little") + b"PE\0\0"
+            + (0x014C).to_bytes(2, "little") + b"\1\0" + payload)
+
+
+def timing_fixture(root: Path, rate: int) -> Path:
+    path = root / f"timing-{rate}"
+    path.mkdir()
+    data = pe32_fixture(f"release-payload-{rate}".encode())
+    (path / "uprising120.dll").write_bytes(data)
+    (path / "build-result.json").write_text(json.dumps({
+        "target_updates_hz": rate, "dll_sha256": hashlib.sha256(data).hexdigest()}))
+    B.KNOWN_TIMING_SHA256[rate] = hashlib.sha256(data).hexdigest()
+    return path
+
 def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
@@ -56,9 +72,12 @@ def make_source(root: Path, home: Path):
         (dc / d).mkdir(parents=True)
         (dc / d / f).write_text("TEST-ONLY")
     (dc / "u60-mtld3d").mkdir(parents=True)
-    (dc / "u60-mtld3d/Uprising60.exe").write_text("PAYLOAD-EXE")
+    loader_bytes = pe32_fixture(b"PAYLOAD-EXE")
+    (dc / "u60-mtld3d/Uprising60.exe").write_bytes(loader_bytes)
     (dc / "u60-mtld3d/uprising60.dll").write_text("PAYLOAD-DLL")
     data = dc / "ra3-mtld3d/Data"
+    data.mkdir(parents=True)
+    (data / "StaticStream.big").write_text("FIXTURE-STATIC")
     (data / "mtld3d-logs").mkdir(parents=True)
     (data / "mtld3d-logs/run.log").write_text("LOG")
     (data / "ra3ep1_1.0.game").write_text("GAME-DATA")
@@ -81,14 +100,16 @@ def make_source(root: Path, home: Path):
     manifest = {"schema": "ra3-fixed-viewport-candidate-v1", "wine_source": "abc",
                 "runtime_pins": {"bin/wine": sha(wine / "bin/wine"),
                                  "share/wine/fonts/marlett.ttf": sha(wine / "share/wine/fonts/marlett.ttf")},
-                "game_pins": {"Data/ra3ep1_1.0.game": sha(data / "ra3ep1_1.0.game")},
+                "game_pins": {"Data/ra3ep1_1.0.game": sha(data / "ra3ep1_1.0.game"),
+                              B.STATIC_REL: sha(data / "StaticStream.big")},
                 "payload_pins": {"Uprising60.exe": sha(dc / "u60-mtld3d/Uprising60.exe"),
                                  "uprising60.dll": sha(dc / "u60-mtld3d/uprising60.dll")}}
     (root / "candidate-manifest.json").write_text(json.dumps(manifest))
     return manifest
 
 def args_for(root, out, launcher, icon, helper, prepare=False, audio=None, patch=None,
-             bundle_id=None, presentation=None, display_plan=None):
+             bundle_id=None, presentation=None, display_plan=None, timing_60=None,
+             timing_120=None, timing_dir=None, runtime_only=False):
     import argparse
     ns = argparse.Namespace(output=str(out), icon=str(icon), runtime_root=str(root),
                             launcher=str(launcher), display_helper=str(helper),
@@ -103,6 +124,14 @@ def args_for(root, out, launcher, icon, helper, prepare=False, audio=None, patch
         ns.presentation = presentation
     if display_plan is not None:
         ns.display_plan = str(display_plan)
+    if timing_60 is not None:
+        ns.timing_60 = str(timing_60)
+    if timing_120 is not None:
+        ns.timing_120 = str(timing_120)
+    if timing_dir is not None:
+        ns.timing_dir = str(timing_dir)
+    if runtime_only:
+        ns.runtime_only = True
     return ns
 
 def main() -> int:
@@ -124,9 +153,16 @@ def main() -> int:
     dplan = fixtures / "display-plan-helper"
     dplan.write_bytes(DPLAN_BYTES)
     dplan.chmod(0o755)
+    timing = {rate: timing_fixture(fixtures, rate) for rate in (60, 120)}
+    pins = make_source(src.resolve(), home.resolve())
+    loader_bytes = (src / "prefix/drive_c/u60-mtld3d/Uprising60.exe").read_bytes()
+    flat_timing = fixtures / "flat-timing"
+    flat_timing.mkdir()
+    (flat_timing / "Uprising60.exe").write_bytes(loader_bytes)
+    for rate in (60, 120):
+        shutil.copy2(timing[rate] / "uprising120.dll", flat_timing / f"fps{rate}.dll")
     audio_sha, patch_sha = hashlib.sha256(AUDIO_BYTES).hexdigest(), sha(apatch)
     orig_sha = hashlib.sha256(ORIGINAL_AUDIO_BYTES).hexdigest()
-    pins = make_source(src.resolve(), home.resolve())
 
     def source_digest():
         h = hashlib.sha256()
@@ -155,6 +191,7 @@ def main() -> int:
     assert (res / "display-mode").read_text() == "HELPER-BIN" and (res / "AppIcon.icns").read_text() == "ICON-DATA"
     m = json.loads((res / "manifest.json").read_text())
     assert m["schema"] == B.SCHEMA and m["version"] == "1.0" and m["local_only"] is True
+    assert "data_version" not in m and "timing_pins" not in m and "frame_rate_profiles" not in m
     assert m["bundle"]["id"] == B.BUNDLE_ID and m["bundle"]["executable"] == "RA3Launcher"
     assert m["runtime_pins"] == {**pins["runtime_pins"], B.AUDIO_PIN: audio_sha}, \
         "runtime pins must equal candidate pins plus the audio overlay pin"
@@ -227,13 +264,31 @@ def main() -> int:
     outa = base / "RA3-Adaptive.app"
     nsa = args_for(src, outa, tools / "RA3Launcher", icon, tools / "display-mode",
                    audio=amod, patch=apatch, bundle_id=B.ADAPTIVE_BUNDLE_ID,
-                   presentation="safe-area", display_plan=dplan)
-    rpa = B.build_app(nsa, home=home)
+                   presentation="safe-area", display_plan=dplan,
+                   timing_60=timing[60], timing_120=timing[120])
+    rpa = B.build_app(nsa, home=home,
+                      known_static=(sha(src / "prefix/drive_c/ra3-mtld3d/Data/StaticStream.big"),
+                                    B.KNOWN_NEW_STATIC))
     resa = outa / "Contents/Resources"
     ma = json.loads((resa / "manifest.json").read_text())
     pla = plistlib.load((outa / "Contents/Info.plist").open("rb"))
-    assert ma["presentation"] == "safe-area-v1", "adaptive manifest presentation missing"
+    assert ma["data_version"] == "1.0" and ma["version"] == "1.2.0"
+    assert ma["bundle"]["short_version"] == "1.2.0" and ma["bundle"]["build_version"] == "3"
+    assert ma["timing_pins"] == {
+        "Uprising60.exe": sha(resa / "timing/Uprising60.exe"),
+        "fps60.dll": sha(resa / "timing/fps60.dll"),
+        "fps120.dll": sha(resa / "timing/fps120.dll"),
+    }
+    assert set(ma["frame_rate_profiles"]) == {"60", "120"}
+    assert ma["default_frame_rate"] == 60
+    assert pla["CFBundleShortVersionString"] == "1.2.0" and pla["CFBundleVersion"] == "3"
     assert ma["bundle"]["id"] == B.ADAPTIVE_BUNDLE_ID, "adaptive manifest bundle id wrong"
+    assert set(ma["frame_rate_profiles"]) == {"60", "120"}
+    assert ma["frame_rate_profiles"] == {
+        "60": {"dll": "fps60.dll", "log": "uprising120.log"},
+        "120": {"dll": "fps120.dll", "log": "uprising120.log"},
+    }
+    assert "resource_updates" not in ma, "unrecognized source StaticStream must not claim an upgrade"
     assert pla["CFBundleIdentifier"] == B.ADAPTIVE_BUNDLE_ID, "adaptive Info.plist id wrong"
     assert B.BUNDLE_ID != B.ADAPTIVE_BUNDLE_ID and pl["CFBundleIdentifier"] != pla["CFBundleIdentifier"], \
         "candidate must carry a unique bundle id (separate Application Support container)"
@@ -253,6 +308,47 @@ def main() -> int:
     repa = json.loads(rpa.read_text())
     assert repa["presentation"] == {"mode": "safe-area", "bundle_id": B.ADAPTIVE_BUNDLE_ID}, \
         "report presentation record wrong"
+
+    runtime_out = base / "RA3-Runtime.app"
+    runtime_ns = args_for(src, runtime_out, tools / "RA3Launcher", icon, tools / "display-mode",
+                          audio=amod, patch=apatch, bundle_id=B.ADAPTIVE_BUNDLE_ID,
+                          presentation="safe-area", display_plan=dplan,
+                          timing_60=timing[60], timing_120=timing[120], runtime_only=True)
+    runtime_report = B.build_app(runtime_ns, home=home)
+    runtime_resources = runtime_out / "Contents/Resources"
+    runtime_manifest = json.loads((runtime_resources / "manifest.json").read_text())
+    assert not (runtime_resources / "prefix-template/drive_c/ra3-mtld3d").exists()
+    assert runtime_manifest["game_pins"] == {}
+    assert runtime_manifest["timing_pins"] == {
+        "Uprising60.exe": sha(runtime_resources / "timing/Uprising60.exe"),
+        "fps60.dll": sha(runtime_resources / "timing/fps60.dll"),
+        "fps120.dll": sha(runtime_resources / "timing/fps120.dll"),
+    }
+    assert "resource_updates" not in runtime_manifest
+    assert runtime_report.is_file()
+
+    flat_out = base / "RA3-FlatRuntime.app"
+    flat_ns = args_for(src, flat_out, tools / "RA3Launcher", icon, tools / "display-mode",
+                       audio=amod, patch=apatch, bundle_id=B.ADAPTIVE_BUNDLE_ID,
+                       presentation="safe-area", display_plan=dplan,
+                       timing_dir=flat_timing, runtime_only=True)
+    B.build_app(flat_ns, home=home)
+    flat_manifest = json.loads((flat_out / "Contents/Resources/manifest.json").read_text())
+    assert flat_manifest["game_pins"] == {}
+    assert flat_manifest["timing_pins"] == {
+        name: sha(flat_out / "Contents/Resources/timing" / name)
+        for name in ("Uprising60.exe", "fps60.dll", "fps120.dll")}
+    assert (flat_out / "Contents/Resources/timing/Uprising60.exe").read_bytes() == loader_bytes
+
+    mixed_ns = args_for(src, base / "RA3-MixedTiming.app", tools / "RA3Launcher", icon,
+                        tools / "display-mode", audio=amod, patch=apatch,
+                        timing_dir=flat_timing, timing_60=timing[60], timing_120=timing[120])
+    expect_abort = False
+    try:
+        B.build_app(mixed_ns, home=home)
+    except B.BuildError as error:
+        expect_abort = "cannot be combined" in str(error)
+    assert expect_abort and not Path(mixed_ns.output).exists()
 
     # -- refusals and aborts ------------------------------------------------
     def expect_abort(ns, home_=home, cleaned=True):

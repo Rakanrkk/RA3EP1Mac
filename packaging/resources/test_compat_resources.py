@@ -5,6 +5,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+import unittest.mock
 
 import importlib.util
 import sys
@@ -162,6 +163,279 @@ class BigArchiveTests(unittest.TestCase):
                              ['data/static.manifest', 'data/static.bin', 'untouched.bin'])
 
 
+class LightVariantTests(unittest.TestCase):
+    """Synthetic high-refresh light fixtures; every pin is derived per fixture."""
+
+    def _decoded_stream(self, asset=None):
+        asset = _light_asset() if asset is None else asset
+        return b'12345678' + asset
+
+    def _write_source(self, root, decoded_stream, name_hash=None):
+        packed = _refpack_literal(decoded_stream)
+        manifest = _static_manifest_for([
+            (compat.LIGHT_ASSET, compat.LIGHT_TYPE,
+             compat.LIGHT_NAME_HASH if name_hash is None else name_hash,
+             compat.LIGHT_ASSET_SIZE)])
+        original = _big_bytes([
+            ('data/static.manifest', _refpack_literal(manifest)),
+            ('data/static.bin', packed),
+            ('untouched.bin', b'other static data'),
+        ])
+        source = root / 'StaticStream.big'
+        source.write_bytes(original)
+        return (source, hashlib.sha256(packed).hexdigest(),
+                hashlib.sha256(decoded_stream).hexdigest())
+
+    def test_light_patch_appends_bank_and_changes_only_two_floats(self):
+        decoded = self._decoded_stream()
+        with tempfile.TemporaryDirectory(prefix='compat-light-') as directory:
+            root = Path(directory)
+            source, packed_sha, decoded_sha = self._write_source(root, decoded)
+            source_bytes = source.read_bytes()
+            output = root / 'light.big'
+            details = compat.patch_static_light_archive(
+                source, output, root, packed_bank_sha=packed_sha,
+                decoded_bank_sha=decoded_sha)
+            self.assertEqual(source.read_bytes(), source_bytes)
+            expected = bytearray(decoded)
+            expected[8 + 0x60:8 + 0x68] = struct.pack('<2f', 0.0, 0.0)
+            expected = bytes(expected)
+            changed = [index for index, (before, after) in enumerate(zip(decoded, expected))
+                       if before != after]
+            self.assertEqual(changed, [8 + 0x62, 8 + 0x63, 8 + 0x66, 8 + 0x67])
+            raw = output.read_bytes()
+            entries = compat.big_catalog_bytes(raw)
+            self.assertEqual([entry[0] for entry in entries],
+                             ['data/static.manifest', 'data/static.bin', 'untouched.bin'])
+            self.assertEqual(_big_member(raw, 'data/static.bin'), expected)
+            self.assertEqual(_big_member(raw, 'untouched.bin'), b'other static data')
+            self.assertEqual(_big_member(raw, 'data/static.manifest'),
+                             _big_member(source_bytes, 'data/static.manifest'))
+            new_offset, new_size, _ = entries[1][1:]
+            self.assertEqual((new_offset, new_size), (len(source_bytes), len(expected)))
+            self.assertEqual(details['asset'], 'FXParticleSystemTemplate:JapanPowerPlantIdleLight')
+            self.assertEqual(details['asset_offset'], 8)
+            self.assertEqual(details['changed_asset_offsets'], ['0x60', '0x64'])
+            self.assertEqual(details['decoded_stream_size'], len(decoded))
+            self.assertEqual(details['verified_other_entries'], 2)
+            self.assertEqual(details['source_packed_bank_sha256'], packed_sha)
+
+    def test_light_patch_rejects_tampered_packed_bank(self):
+        decoded = self._decoded_stream()
+        with tempfile.TemporaryDirectory(prefix='compat-light-bad-') as directory:
+            root = Path(directory)
+            source, packed_sha, decoded_sha = self._write_source(root, decoded)
+            raw = bytearray(source.read_bytes())
+            entry = next(item for item in compat.big_catalog_bytes(bytes(raw))
+                         if item[0] == 'data/static.bin')
+            raw[entry[1] + entry[2] - 1] ^= 0xff
+            source.write_bytes(bytes(raw))
+            output = root / 'light.big'
+            with self.assertRaises(compat.ResourceError):
+                compat.patch_static_light_archive(
+                    source, output, root, packed_bank_sha=packed_sha,
+                    decoded_bank_sha=decoded_sha)
+            self.assertFalse(output.exists())
+
+    def test_light_patch_rejects_unexpected_decoded_bank(self):
+        decoded = self._decoded_stream()
+        with tempfile.TemporaryDirectory(prefix='compat-light-dec-') as directory:
+            root = Path(directory)
+            source, packed_sha, _ = self._write_source(root, decoded)
+            output = root / 'light.big'
+            with self.assertRaises(compat.ResourceError):
+                compat.patch_static_light_archive(
+                    source, output, root, packed_bank_sha=packed_sha,
+                    decoded_bank_sha='0' * 64)
+            self.assertFalse(output.exists())
+
+    def test_light_patch_rejects_unexpected_template_fields(self):
+        asset = bytearray(_light_asset())
+        struct.pack_into('<2f', asset, 0x60, 2.0, 2.0)
+        decoded = self._decoded_stream(bytes(asset))
+        with tempfile.TemporaryDirectory(prefix='compat-light-fields-') as directory:
+            root = Path(directory)
+            source, packed_sha, decoded_sha = self._write_source(root, decoded)
+            output = root / 'light.big'
+            with self.assertRaises(compat.ResourceError):
+                compat.patch_static_light_archive(
+                    source, output, root, packed_bank_sha=packed_sha,
+                    decoded_bank_sha=decoded_sha)
+            self.assertFalse(output.exists())
+
+    def test_light_patch_rejects_wrong_template_name_hash(self):
+        decoded = self._decoded_stream()
+        with tempfile.TemporaryDirectory(prefix='compat-light-name-') as directory:
+            root = Path(directory)
+            source, packed_sha, decoded_sha = self._write_source(
+                root, decoded, name_hash=compat.LIGHT_NAME_HASH ^ 0x5a)
+            output = root / 'light.big'
+            with self.assertRaises(compat.ResourceError):
+                compat.patch_static_light_archive(
+                    source, output, root, packed_bank_sha=packed_sha,
+                    decoded_bank_sha=decoded_sha)
+            self.assertFalse(output.exists())
+
+    def test_light_patch_refuses_already_light_input(self):
+        decoded = self._decoded_stream()
+        with tempfile.TemporaryDirectory(prefix='compat-light-again-') as directory:
+            root = Path(directory)
+            source, packed_sha, decoded_sha = self._write_source(root, decoded)
+            first = root / 'light.big'
+            compat.patch_static_light_archive(
+                source, first, root, packed_bank_sha=packed_sha,
+                decoded_bank_sha=decoded_sha)
+            second = root / 'light-again.big'
+            with self.assertRaises(compat.ResourceError):
+                compat.patch_static_light_archive(
+                    first, second, root, packed_bank_sha=packed_sha,
+                    decoded_bank_sha=decoded_sha)
+            self.assertFalse(second.exists())
+            with first.open('rb') as stream:
+                stream.seek(len(source.read_bytes()) + 8 + 0x60)
+                self.assertEqual(stream.read(8), struct.pack('<2f', 0.0, 0.0))
+
+    def test_light_state_pins_and_classifier(self):
+        self.assertEqual(compat.LIGHT_CONTRACTS[2].patched_sha256, compat.LIGHT_TARGET_SHA)
+        self.assertNotEqual(compat.LIGHT_CONTRACTS[2].patched_sha256,
+                            compat.CONTRACTS[2].patched_sha256)
+        for index in (0, 1):
+            self.assertEqual(compat.LIGHT_CONTRACTS[index], compat.CONTRACTS[index])
+        self.assertEqual(compat._light_static_state(compat.STATIC_CONTRACT.original_sha256),
+                         'original')
+        self.assertEqual(compat._light_static_state(compat.STATIC_CONTRACT.patched_sha256),
+                         'accepted_soviet_glow')
+        self.assertEqual(compat._light_static_state(compat.LIGHT_TARGET_SHA),
+                         'already_high_refresh_light')
+        with self.assertRaises(compat.ResourceError):
+            compat._light_static_state('f' * 64)
+
+    def test_light_mode_refuses_unknown_static_input(self):
+        with tempfile.TemporaryDirectory(prefix='compat-light-gen-') as directory:
+            root = Path(directory)
+            data = root / 'game' / 'Data'
+            data.mkdir(parents=True)
+            for contract in compat.CONTRACTS:
+                (data / contract.name).write_bytes(b'unknown:' + contract.name.encode())
+            output = root / 'new-output'
+            with self.assertRaises(compat.ResourceError):
+                compat.generate_resources(data.parent, output, high_refresh_light=True)
+            self.assertFalse(output.exists())
+
+    def test_original_static_is_accepted_then_light_patched(self):
+        glow = _glow_asset()
+        light = _light_asset()
+        decoded = b'12345678' + glow + light
+        manifest = _static_manifest_for([
+            (compat.GLOW_ASSET, compat.GLOW_TYPE, compat.GLOW_NAME_HASH,
+             compat.GLOW_ASSET_SIZE),
+            (compat.LIGHT_ASSET, compat.LIGHT_TYPE, compat.LIGHT_NAME_HASH,
+             compat.LIGHT_ASSET_SIZE),
+        ])
+        source_bytes = _big_bytes([
+            ('data/static.manifest', _refpack_literal(manifest)),
+            ('data/static.bin', _refpack_literal(decoded)),
+            ('untouched.bin', b'original archive member'),
+        ])
+        with tempfile.TemporaryDirectory(prefix='compat-light-chain-') as directory:
+            root = Path(directory)
+            source = root / 'original.big'
+            source.write_bytes(source_bytes)
+            accepted = root / 'accepted.big'
+            compat.patch_static_archive(source, accepted, root)
+            accepted_entries = compat.big_catalog_file(accepted)
+            static_entry = next(row for row in accepted_entries
+                                if row[0] == 'data/static.bin')
+            packed_sha = compat._member_sha256(accepted, static_entry)
+            decoded_accepted = root / 'accepted.decoded'
+            compat.decode_refpack_range(accepted, static_entry[1], static_entry[2],
+                                        decoded_accepted)
+            decoded_sha = compat.sha256_file(decoded_accepted)
+            accepted_bank = decoded_accepted.read_bytes()
+            self.assertEqual(struct.unpack_from('<2f', accepted_bank, 8 + 0x60),
+                             (14.0, 14.0))
+            self.assertEqual(struct.unpack_from('<2f', accepted_bank, 8 + 552 + 0x60),
+                             (1.0, 1.0))
+
+            final = root / 'light.big'
+            details = compat.patch_static_light_archive(
+                accepted, final, root, packed_bank_sha=packed_sha,
+                decoded_bank_sha=decoded_sha)
+            final_bank = _big_member(final.read_bytes(), 'data/static.bin')
+            self.assertEqual(struct.unpack_from('<2f', final_bank, 8 + 0x60),
+                             (14.0, 14.0))
+            self.assertEqual(struct.unpack_from('<2f', final_bank, 8 + 552 + 0x60),
+                             (0.0, 0.0))
+            expected = bytearray(accepted_bank)
+            expected[8 + 552 + 0x60:8 + 552 + 0x68] = struct.pack('<2f', 0.0, 0.0)
+            self.assertEqual(final_bank, bytes(expected))
+            self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertEqual(details['source_packed_bank_sha256'], packed_sha)
+
+    def test_generator_copies_already_light_inputs_through(self):
+        contents = {
+            'Shaders.big': b'synthetic accepted shaders',
+            'Misc.big': b'synthetic accepted misc',
+            'StaticStream.big': b'synthetic already-light static',
+        }
+        fixture_contracts = tuple(
+            compat.ArchiveContract(name, '0' * 64,
+                                   hashlib.sha256(contents[name]).hexdigest())
+            for name in ('Shaders.big', 'Misc.big', 'StaticStream.big'))
+        fixture_target = fixture_contracts[2].patched_sha256
+        with tempfile.TemporaryDirectory(prefix='compat-light-copy-') as directory:
+            root = Path(directory)
+            data = root / 'game' / 'Data'
+            data.mkdir(parents=True)
+            for name, content in contents.items():
+                (data / name).write_bytes(content)
+            source_snapshot = {name: (data / name).read_bytes() for name in contents}
+            output = root / 'resources'
+            with unittest.mock.patch.multiple(
+                    compat, LIGHT_TARGET_SHA=fixture_target,
+                    LIGHT_CONTRACTS=fixture_contracts):
+                result = compat.generate_resources(data.parent, output,
+                                                   high_refresh_light=True)
+            self.assertEqual(result['status'], 'PASS')
+            self.assertEqual(result['static_stream_variant'], 'high-refresh-light')
+            self.assertEqual(result['target_pins']['StaticStream.big'], fixture_target)
+            self.assertEqual(result['archives'][2]['input_state'],
+                             'already_high_refresh_light')
+            self.assertEqual(result['archives'][2]['operation'],
+                             'copied_high_refresh_light_input')
+            for name, content in contents.items():
+                self.assertEqual((data / name).read_bytes(), source_snapshot[name])
+                self.assertEqual((output / name).read_bytes(), content)
+
+    def test_manifest_locator_resolves_both_templates(self):
+        manifest = _static_manifest_for([
+            (compat.GLOW_ASSET, compat.GLOW_TYPE, compat.GLOW_NAME_HASH, 16),
+            (compat.LIGHT_ASSET, compat.LIGHT_TYPE, compat.LIGHT_NAME_HASH, 16),
+        ])
+        glow = compat._find_static_asset(manifest, compat.GLOW_ASSET, compat.GLOW_TYPE,
+                                         compat.GLOW_NAME_HASH, 16, 'SovietPowerGlow')
+        light = compat._find_static_asset(manifest, compat.LIGHT_ASSET, compat.LIGHT_TYPE,
+                                          compat.LIGHT_NAME_HASH, 16, 'JapanPowerPlantIdleLight')
+        self.assertEqual(glow['asset_index'], 0)
+        self.assertEqual(glow['asset_offset'], 8)
+        self.assertEqual(light['asset_index'], 1)
+        self.assertEqual(light['asset_offset'], 8 + 16)
+        self.assertEqual(glow['decoded_size'], 8 + 32)
+        self.assertEqual(light['decoded_size'], 8 + 32)
+        for name, type_code, name_hash, size in (
+                (compat.LIGHT_ASSET, compat.LIGHT_TYPE, compat.LIGHT_NAME_HASH, 15),
+                (compat.LIGHT_ASSET, compat.LIGHT_TYPE, compat.LIGHT_NAME_HASH ^ 1, 16),
+                (b'FXParticleSystemTemplate:Missing', compat.LIGHT_TYPE,
+                 compat.LIGHT_NAME_HASH, 16)):
+            with self.subTest(name=name):
+                bad = _static_manifest_for([
+                    (compat.GLOW_ASSET, compat.GLOW_TYPE, compat.GLOW_NAME_HASH, 16),
+                    (name, type_code, name_hash, size)])
+                with self.assertRaises(compat.ResourceError):
+                    compat._find_static_asset(bad, compat.LIGHT_ASSET, compat.LIGHT_TYPE,
+                                              compat.LIGHT_NAME_HASH, 16, 'Light')
+
+
 class GenerationSafetyTests(unittest.TestCase):
     def test_unknown_input_refused_before_output_creation(self):
         with tempfile.TemporaryDirectory(prefix='compat-resources-') as directory:
@@ -269,15 +543,43 @@ def _make_bloom_script():
             b'callproc PostEffectBloom\r\ncallproc PostEffectBloom\r\n')
 
 
-def _static_manifest(asset_size):
-    name = compat.GLOW_ASSET + b'\0'
-    manifest = bytearray(52 + 48 + len(name))
-    struct.pack_into('<I', manifest, 16, 1)
-    struct.pack_into('<4I', manifest, 36, 0, 0, len(name), 0)
-    struct.pack_into('<12I', manifest, 52, compat.GLOW_TYPE, compat.GLOW_NAME_HASH,
-                     0, 0, 0, 0, 0, 0, asset_size, 0, 0, 0)
-    manifest[100:] = name
+def _static_manifest_for(assets):
+    """Build a static.manifest: rows of (name, type, name hash, asset size)."""
+    encoded = b''.join(name + b'\0' for name, _, _, _ in assets)
+    manifest = bytearray(52 + 48 * len(assets) + len(encoded))
+    struct.pack_into('<I', manifest, 16, len(assets))
+    struct.pack_into('<4I', manifest, 36, 0, 0, len(encoded), 0)
+    name_offset = 0
+    for index, (_, type_code, name_hash, asset_size) in enumerate(assets):
+        struct.pack_into('<12I', manifest, 52 + 48 * index, type_code, name_hash,
+                         0, 0, 0, 0, name_offset, 0, asset_size, 0, 0, 0)
+        name_offset += len(assets[index][0]) + 1
+    manifest[52 + 48 * len(assets):] = encoded
     return bytes(manifest)
+
+
+def _static_manifest(asset_size):
+    return _static_manifest_for([(compat.GLOW_ASSET, compat.GLOW_TYPE,
+                                  compat.GLOW_NAME_HASH, asset_size)])
+
+
+def _light_asset():
+    asset = bytearray(compat.LIGHT_ASSET_SIZE)
+    struct.pack_into('<2f', asset, 0x3c, 1.0, 1.0)
+    struct.pack_into('<2f', asset, 0x48, 70.0, 70.0)
+    struct.pack_into('<2f', asset, 0x60, 1.0, 1.0)
+    struct.pack_into('<2f', asset, 0x6c, 1.0, 1.0)
+    return bytes(asset)
+
+
+def _glow_asset():
+    asset = bytearray(compat.GLOW_ASSET_SIZE)
+    struct.pack_into('<2f', asset, 0x3c, 15.0, 15.0)
+    struct.pack_into('<2f', asset, 0x48, 70.0, 70.0)
+    struct.pack_into('<2f', asset, 0x60, 15.0, 15.0)
+    struct.pack_into('<2f', asset, 0x6c, 1.0, 1.0)
+    asset[0x80:0x80 + len(b'GPUParticle.fx\0')] = b'GPUParticle.fx\0'
+    return bytes(asset)
 
 
 if __name__ == '__main__':
