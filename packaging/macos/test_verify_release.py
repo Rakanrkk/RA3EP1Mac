@@ -43,6 +43,9 @@ def write_app_fixture(root: Path):
     payload.write_bytes(b"PE-fixture")
     timing = resources / "timing/fps60.dll"
     timing.write_bytes(b"timing-fixture")
+    # Real-world catch: a diagnostic log in the payload tree outside users/.
+    payload_log = resources / "prefix-template/drive_c/u60-mtld3d/uprising60.log"
+    payload_log.write_bytes(b"LOG" * 66)
     pins = {
         "runtime_pins": {"lib/wine/x86_64-unix/winecoreaudio.so": verify.sha256_file(wine)},
         "game_pins": {"Data/game.dat": verify.sha256_file(game)},
@@ -250,6 +253,27 @@ def test_public_adhoc_signature_wording_and_identity_guard():
         raise AssertionError("public signature wording accepted a private identity")
 
 
+def test_payload_and_shipped_logs_flagged_anywhere_in_app():
+    with tempfile.TemporaryDirectory(prefix="ra3-audit-logs-") as temporary:
+        app = Path(temporary) / "fixture.app"
+        write_app_fixture(app)
+        game_log = (app / "Contents/Resources/prefix-template/drive_c/ra3-mtld3d/"
+                    "ra3ep1_1.0.game_d3d9.log")
+        game_log.write_bytes(b"d3d9-log")
+        help_log = (app / "Contents/Resources/prefix-template/drive_c/ra3-mtld3d/"
+                    "Support/EA Help/en-us/EA Help.log")
+        help_log.parent.mkdir(parents=True)
+        help_log.write_bytes(b"help-log")
+        report = verify.audit_app(app)
+        logged = {item["path"] for item in report["path_findings"]
+                  if item["kind"] == "log_file_in_publish_scope"}
+        assert ("Contents/Resources/prefix-template/drive_c/u60-mtld3d/uprising60.log") in logged
+        assert ("Contents/Resources/prefix-template/drive_c/ra3-mtld3d/ra3ep1_1.0.game_d3d9.log") in logged
+        assert ("Contents/Resources/prefix-template/drive_c/ra3-mtld3d/Support/EA Help/en-us/EA Help.log") in logged
+        # The payload binary itself is never a log finding.
+        assert not any("Uprising60.exe" in path for path in logged)
+
+
 def test_internal_relative_symlinks_allowed_escapes_and_dangling_flagged():
     with tempfile.TemporaryDirectory(prefix="ra3-audit-links-") as temporary:
         base = Path(temporary)
@@ -289,6 +313,7 @@ def main():
         test_player_save_cleanup_is_scoped_to_cloned_game_directories,
         test_snapshot_scope_and_non_overwriting_output,
         test_snapshot_covers_mac_style_profile_saved_games_location,
+        test_payload_and_shipped_logs_flagged_anywhere_in_app,
         test_public_adhoc_signature_wording_and_identity_guard,
         test_internal_relative_symlinks_allowed_escapes_and_dangling_flagged,
     ]

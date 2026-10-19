@@ -275,8 +275,9 @@ def _path_findings(root: Path, entries: list[dict], app_mode: bool):
         if is_player_area and (parts & PLAYER_ARCHIVE_DIRS):
             findings.append({"path": rel, "kind": "player_save_or_replay_content"})
         if leaf.endswith(".log"):
-            if (not app_mode) or is_player_area or "timing" in parts:
-                findings.append({"path": rel, "kind": "log_file_in_publish_scope"})
+            # Any real diagnostic log anywhere in the template/payload is a
+            # finding; empty generic Windows directories are handled separately.
+            findings.append({"path": rel, "kind": "log_file_in_publish_scope"})
         # Only explicit CI/private-notes scopes are suspicious: generic Wine
         # prefix directories named "logs" or "notes" are not findings by name.
         # Real .log files above still are.

@@ -161,7 +161,7 @@ def timing_report(directory: Path, rate: int) -> dict:
             "staged_as": f"fps{rate}.dll"}
 
 
-def validate_runtime_root(runtime_root: Path, runtime_only: bool, require_timing_loader: bool = True) -> Path:
+def validate_runtime_root(runtime_root: Path, runtime_only: bool) -> Path:
     root = runtime_root.expanduser().resolve()
     if not root.is_dir():
         raise ReleaseBuildError(f"--runtime-root must be an existing directory: {root}")

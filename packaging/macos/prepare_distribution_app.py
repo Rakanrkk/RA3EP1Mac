@@ -15,16 +15,42 @@ GAME_PLAYER_DIRS = {"red alert 3 uprising", "紅色警戒3 - 起義時刻"}
 
 
 def is_private_player_file(path, users_root):
-    """Identify logs and every file below a player's Saved Games/Replays folder."""
-    path, users_root = Path(path), Path(users_root)
+    """Diagnostic/save suffixes anywhere in the template; archive dirs player-scoped.
+
+    .log/.dmp/.mdmp and EA save/replay extensions are removed wherever they sit
+    in the prefix template (payload, game and shipped-help logs included).
+    Whole Saved Games/Replays directories are removed only inside game player
+    folders. Normal shipped non-log files are never matched.
+    """
+    path = Path(path)
+    if path.suffix.lower() in PRIVATE_SUFFIXES:
+        return True
     try:
-        relative = path.relative_to(users_root)
+        relative = path.relative_to(Path(users_root))
     except ValueError:
         return False
     parts = relative.parts
     is_game_profile = any(part.lower() in GAME_PLAYER_DIRS for part in parts)
     is_saved_content = any(part.lower() in PLAYER_ARCHIVE_DIRS for part in parts)
-    return path.suffix.lower() in PRIVATE_SUFFIXES or (is_game_profile and is_saved_content)
+    return is_game_profile and is_saved_content
+
+
+def sanitize_template_files(template, users_root, output_root, removed):
+    """Walk the cloned template once, unlinking player/diagnostic files."""
+    template, users_root, output_root = Path(template), Path(users_root), Path(output_root)
+    for current, dirs, files in os.walk(template, followlinks=False):
+        parent = Path(current)
+        dirs[:] = [name for name in dirs if not (parent / name).is_symlink()]
+        for name in files:
+            path = parent / name
+            if path.is_symlink():
+                continue
+            lower = name.lower()
+            is_player = users_root in path.parents and any(part in path.parts for part in
+                ("Red Alert 3 Uprising", "紅色警戒3 - 起義時刻"))
+            if is_private_player_file(path, users_root) or (is_player and lower.startswith("stats_")):
+                removed.append(str(path.relative_to(output_root)))
+                path.unlink()
 
 
 def remove_player_archive_directories(users_root, output_root, removed):
@@ -105,19 +131,7 @@ def prepare(source, output):
     try:
         template = output / "Contents/Resources/prefix-template"
         users = template / "drive_c/users"
-        for current, dirs, files in os.walk(template, followlinks=False):
-            parent = Path(current)
-            dirs[:] = [name for name in dirs if not (parent / name).is_symlink()]
-            for name in files:
-                path = parent / name
-                if path.is_symlink():
-                    continue
-                lower = name.lower()
-                is_player = users in path.parents and any(part in path.parts for part in
-                    ("Red Alert 3 Uprising", "紅色警戒3 - 起義時刻"))
-                if is_private_player_file(path, users) or (is_player and lower.startswith("stats_")):
-                    removed.append(str(path.relative_to(output)))
-                    path.unlink()
+        sanitize_template_files(template, users, output, removed)
         backup = template / "system 2.reg"
         if backup.exists():
             removed.append(str(backup.relative_to(output)))

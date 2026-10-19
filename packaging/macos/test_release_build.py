@@ -132,13 +132,48 @@ def test_runtime_preflight_checks_complete_pins_and_rejects_escape(base, runtime
 
 def test_flat_timing_directory_validates_three_files(base, runtime, flat_timing):
     assert R.validate_flat_timing_directory(flat_timing, runtime) == flat_timing.resolve()
-    (flat_timing / "fps120.dll").write_bytes(b"truncated")
+    target = flat_timing / "fps120.dll"
+    original = target.read_bytes()
+    target.write_bytes(b"truncated")
     try:
         R.validate_flat_timing_directory(flat_timing, runtime)
     except R.ReleaseBuildError as error:
         assert "not a PE image" in str(error)
     else:
         raise AssertionError("truncated flat timing DLL should be refused")
+    finally:
+        target.write_bytes(original)
+
+
+def test_flat_timing_is_forwarded_for_full_app(base, runtime, audio, icon, overrides, timing, flat_timing):
+    args = make_args(base, runtime, audio, icon, timing_dir=flat_timing,
+                     overrides={"launcher": overrides["launcher"],
+                                "display-mode": overrides["display-mode"],
+                                "display-plan": overrides["display-plan"]},
+                     output=base / "FlatFull.app", public=True)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[2:4] == ["-c", R.BUILD_APP_RUNNER]:
+            (args.output / "Contents/Resources").mkdir(parents=True)
+        elif Path(command[2]) == R.MACOS / "sign_app.py":
+            report = Path(command[command.index("--report") + 1])
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("{}")
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with mock.patch.object(R.sys, "platform", "darwin"), mock.patch.object(
+            R.subprocess, "run", side_effect=fake_run):
+        R.build_and_sign(args)
+    build_command = next(command for command in calls if command[2:4] == ["-c", R.BUILD_APP_RUNNER])
+    assert build_command[build_command.index("--timing-dir") + 1] == str(flat_timing.resolve())
+    assert "--timing-60" not in build_command and "--timing-120" not in build_command
+    assert "--runtime-only" not in build_command
+    sign_command = next(command for command in calls if Path(command[2]) == R.MACOS / "sign_app.py")
+    assert "--public" in sign_command and sign_command[sign_command.index("--identity") + 1] == "-"
 
 
 def test_missing_inputs_and_existing_output_abort_before_subprocess(base, runtime, audio, icon, timing):
@@ -293,6 +328,8 @@ def main():
         runtime, audio, icon, overrides, timing, flat_timing = make_inputs(base)
         checks.append(("runtime preflight", lambda: test_runtime_preflight_checks_complete_pins_and_rejects_escape(base, runtime)))
         checks.append(("flat timing inputs", lambda: test_flat_timing_directory_validates_three_files(base, runtime, flat_timing)))
+        checks.append(("flat full app forwarding", lambda: test_flat_timing_is_forwarded_for_full_app(
+            base, runtime, audio, icon, overrides, timing, flat_timing)))
         checks.append(("output guard", lambda: test_missing_inputs_and_existing_output_abort_before_subprocess(base, runtime, audio, icon, timing)))
         checks.append(("audio guard", lambda: test_invalid_audio_is_refused_before_subprocess(base, runtime, icon, timing)))
         checks.append(("safe-area build", lambda: test_safe_area_compiles_and_passes_adaptive_contract(base, runtime, audio, icon, timing)))

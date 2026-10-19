@@ -307,13 +307,25 @@ def test_source_privacy_scan() -> None:
         write_bytes(root / "users/Operator/Saved Games/raid.ra3save", b"save")
         write_bytes(root / "users/Operator/ra3ucampaign.ini", b"campaign")
         write_bytes(root / "logs/wine.log", b"log")
+        (root / "drive_c/windows/logs").mkdir(parents=True)
+        empty_saved_games = root / "drive_c/users/crossover/Saved Games"
+        empty_saved_games.mkdir(parents=True)
+        write_bytes(root / "drive_c/u60-mtld3d/uprising60.log", b"x" * 200)
+        write_bytes(root / "drive_c/u60-mtld3d/empty.log", b"")
         write_bytes(root / "drive_c/windows/Fonts/noto.ttf", b"font")
         write_bytes(root / "drive_c/u60-mtld3d/Uprising60.exe", b"payload")
         found = DIST.has_private_player_data(root)
         assert any(name.endswith("raid.ra3save") for name in found)
         assert any(name.endswith("ra3ucampaign.ini") for name in found)
-        assert any(name.endswith("wine.log") for name in found)
+        assert any(name.endswith("wine.log") and name == "logs/wine.log" for name in found)
+        assert any(name.endswith("uprising60.log") for name in found), "nonempty template log is rejected"
+        assert "drive_c/u60-mtld3d/empty.log" not in found, "zero-byte harmless log is allowed"
+        assert "drive_c/windows/logs" not in found, "empty Windows logs scaffold is allowed"
+        assert "drive_c/users/crossover/Saved Games" not in found, "empty Saved Games scaffold is allowed"
         assert not any("noto.ttf" in name or "Uprising60.exe" in name for name in found)
+        write_bytes(root / "drive_c/windows/logs/wine.log", b"nonempty log")
+        found = DIST.has_private_player_data(root)
+        assert any(name.endswith("windows/logs") for name in found), "nonempty log directory is rejected"
     print("PASS privacy scan: generic identity/team guards, CLI terms, portable examples allowed, player data detected")
 
 
@@ -337,6 +349,32 @@ def test_segment_discovery_and_limits() -> None:
             "RA3EP1Mac-v1.2.0-macos-arm64-standalone.004.dmgpart",
         ]
         assert not list(scratch.iterdir()), "scratch segments must be moved, not copied"
+    # The command uses exactly one hdiutil segmentation mode. The main process
+    # verified that specifying count and size together is rejected; retain
+    # count and size acceptance as postconditions instead of CLI options.
+    recorded = []
+
+    def fake_runner(command, *, capture=True):
+        recorded.append(command)
+        if len(command) > 1 and command[1] == "segment":
+            output_base = Path(command[command.index("-o") + 1])
+            for index in range(1, 5):
+                suffix = "dmg" if index == 1 else "dmgpart"
+                write_bytes(output_base.with_name(f"{output_base.stem}.{index:03d}.{suffix}"), b"segment fixture")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with tempfile.TemporaryDirectory(prefix="dist-v12-hdiutil-command-") as directory:
+        root = Path(directory)
+        runtime_source = root / "Runtime"
+        runtime_source.mkdir()
+        assets = root / "assets"
+        assets.mkdir()
+        write_bytes(runtime_source / "README.txt", b"fixture")
+        DIST.create_standalone_image(runtime_source, root / "scratch", assets,
+                                     "test-standalone", runner=fake_runner)
+    segment_command = next(command for command in recorded if "segment" in command)
+    assert "-segmentSize" in segment_command and "1800m" in segment_command
+    assert "-segmentCount" not in segment_command
     # An oversized segment set aborts and leaves the destination untouched.
     with tempfile.TemporaryDirectory(prefix="dist-v12-seg-big-") as directory:
         root = Path(directory)

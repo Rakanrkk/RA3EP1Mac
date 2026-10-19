@@ -309,14 +309,20 @@ def has_private_player_data(root: Path) -> list[str]:
                 dirs.remove(name)
                 continue
             lower = name.casefold()
-            if lower in PRIVATE_USER_DIRS or lower.startswith(("ra3ucampaign", "ra3campaign")):
+            # Empty directories carry no player data. In particular, an empty
+            # Saved Games folder and Wine's empty windows/logs folder are normal
+            # prefix scaffolding; nonempty private folders remain a hard failure.
+            is_empty = not any(child.iterdir())
+            if not is_empty and (lower in PRIVATE_USER_DIRS
+                                 or lower.startswith(("ra3ucampaign", "ra3campaign"))):
                 found.append(str(child.relative_to(root)))
         for name in files:
             path = parent / name
             lower = name.casefold()
             is_player_area = any(part.casefold() in {"users", "saved games", "saves", "replays", "autosaves"}
                                  for part in path.relative_to(root).parts)
-            if (path.suffix.casefold() in PRIVATE_SUFFIXES
+            if ((path.suffix.casefold() in PRIVATE_SUFFIXES
+                 and not (path.suffix.casefold() == ".log" and path.stat().st_size == 0))
                     or (is_player_area and lower.startswith(("stats_", "skirmish", "movies.ini")))
                     or lower in {"ra3ucampaign.ini", "ra3campaign.ini", "ra3u.ini"}):
                 found.append(str(path.relative_to(root)))
@@ -662,7 +668,7 @@ def create_standalone_image(source: Path, scratch: Path, destination: Path, stem
     runner([sys.executable, "-I", str(MAKE_DMG_PATH), "--source", str(source),
             "--output", str(whole), "--volume-name", STANDALONE_VOLUME, "--format", "ULFO"])
     base = scratch / "standalone.dmg"
-    runner(["/usr/bin/hdiutil", "segment", "-segmentCount", "4", "-segmentSize", SEGMENT_SIZE,
+    runner(["/usr/bin/hdiutil", "segment", "-segmentSize", SEGMENT_SIZE,
             "-o", str(base), str(whole)])
     segments = normalize_segments(base, destination, stem)
     runner(["/usr/bin/hdiutil", "verify", str(segments[0])])
